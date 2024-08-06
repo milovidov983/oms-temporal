@@ -47,7 +47,7 @@ var mockBank = &bank{
 	},
 }
 
-func (client PayService) MakePayment(accountNumber string, amount int, referenceID string) (string, error) {
+func (client PayService) MakePayment(accountNumber string, amount int, idempotencyToken string) (string, error) {
 	acct, err := mockBank.findAccount(accountNumber)
 
 	if err != nil {
