@@ -3,12 +3,13 @@ package models
 const GiftCardTaskQueueName = "GIFT_CARD_TASK_QUEUE"
 
 type GiftCardOrderRequest struct {
-	OrderID  int
-	CardType string
-	Amount   int
-	Customer Customer
-	Payment  PaymentDetails
-	Metadata Metadata
+	OrderID     int
+	CardType    string
+	Amount      int
+	CallbackURL string
+	Customer    Customer
+	Payment     PaymentDetails
+	Metadata    Metadata
 }
 
 type Customer struct {

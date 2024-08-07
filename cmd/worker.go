@@ -23,8 +23,13 @@ func main() {
 	// This worker hosts both Workflow and Activity functions.
 	w.RegisterWorkflow(gift_card.IssueGiftCard)
 	w.RegisterActivity(gift_card.Pay)
-	w.RegisterActivity(gift_card.SendFailureNotification)
+	w.RegisterActivity(gift_card.Refund)
 	w.RegisterActivity(gift_card.SendSuccessNotification)
+	w.RegisterActivity(gift_card.SendFailureNotification)
+	w.RegisterActivity(gift_card.SendSupportAlert)
+	w.RegisterActivity(gift_card.SendRefundNotification)
+	w.RegisterActivity(gift_card.ExecuteWebsiteCallback)
+	w.RegisterActivity(gift_card.GetGiftCardNumber)
 
 	// Start listening to the Task Queue.
 	err = w.Run(worker.InterruptCh())

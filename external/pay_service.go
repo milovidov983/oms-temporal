@@ -61,6 +61,11 @@ func (client PayService) MakePayment(accountNumber string, amount int, idempoten
 	return generateTransactionID("T", 10), nil
 }
 
+func (client PayService) RefundPayment(transactionID string, idempotencyToken string) (string, error) {
+	// Предполагаем что мы по transactionID понимаем сколько и кому вернуть
+	return generateTransactionID("R", 10), nil
+}
+
 func generateTransactionID(prefix string, length int) string {
 	randChars := make([]byte, length)
 	for i := range randChars {
