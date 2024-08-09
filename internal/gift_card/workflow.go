@@ -8,13 +8,13 @@ import (
 	"go.temporal.io/sdk/workflow"
 )
 
-func IssueGiftCard(ctx workflow.Context, input models.GiftCardOrderRequest) (string, error) {
+func Processing(ctx workflow.Context, input models.GiftCardOrderRequest) (string, error) {
 	// Настраиваем политику ретраев
 	retrypolicy := &temporal.RetryPolicy{
 		InitialInterval:        time.Second,
 		BackoffCoefficient:     2.0,
 		MaximumInterval:        100 * time.Second,
-		MaximumAttempts:        42, // 0 is unlimited retries
+		MaximumAttempts:        10, // 0 is unlimited retries
 		NonRetryableErrorTypes: []string{"InvalidAccountError", "InsufficientFundsError"},
 	}
 	// настраиваем опции запуска всех активити
@@ -24,6 +24,12 @@ func IssueGiftCard(ctx workflow.Context, input models.GiftCardOrderRequest) (str
 	}
 
 	ctx = workflow.WithActivityOptions(ctx, options)
+
+	/*****************
+	*
+	* ШАГ 1: Оплата
+	*
+	******************/
 
 	// Оплачиваем карту
 	var paymentTransactionID string
@@ -43,6 +49,12 @@ func IssueGiftCard(ctx workflow.Context, input models.GiftCardOrderRequest) (str
 
 		return "", paymentErr
 	}
+
+	/*****************
+	*
+	* ШАГ 2: Получение номера подарочной карты(изменить порядок)
+	*
+	******************/
 
 	// Создаём подарочную карту
 	var giftCardNumber string
@@ -71,6 +83,12 @@ func IssueGiftCard(ctx workflow.Context, input models.GiftCardOrderRequest) (str
 		return "", creatingGiftCardErr
 	}
 
+	/*****************
+	*
+	* ШАГ 3: Отправка нотификации пользователю
+	*
+	******************/
+
 	// Отправляем нотификацию что подарочная карта готова
 	notificationErr := workflow.ExecuteActivity(ctx, SendSuccessNotification, input).Get(ctx, nil)
 	if notificationErr != nil {
@@ -79,6 +97,12 @@ func IssueGiftCard(ctx workflow.Context, input models.GiftCardOrderRequest) (str
 
 		// log error
 	}
+
+	/*****************
+	*
+	* ШАГ 4: Передача карты на сайт
+	*
+	******************/
 
 	// Возвращаем номер подарочной карты через callback сайтика
 	callbackErr := workflow.ExecuteActivity(ctx, ExecuteWebsiteCallback, input, giftCardNumber).Get(ctx, nil)

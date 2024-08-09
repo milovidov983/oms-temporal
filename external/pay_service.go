@@ -57,7 +57,9 @@ func (client PayService) MakePayment(accountNumber string, amount int, idempoten
 	if amount > int(acct.Balance) {
 		return "", &InsufficientFundsError{}
 	}
-
+	//panic("implement me")
+	//return generateTransactionID("P", 10), nil"
+	//return "", errors.New("Some err")
 	return generateTransactionID("T", 10), nil
 }
 

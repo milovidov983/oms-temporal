@@ -21,7 +21,7 @@ func main() {
 	w := worker.New(c, models.GiftCardTaskQueueName, worker.Options{})
 
 	// This worker hosts both Workflow and Activity functions.
-	w.RegisterWorkflow(gift_card.IssueGiftCard)
+	w.RegisterWorkflow(gift_card.Processing)
 	w.RegisterActivity(gift_card.Pay)
 	w.RegisterActivity(gift_card.Refund)
 	w.RegisterActivity(gift_card.SendSuccessNotification)

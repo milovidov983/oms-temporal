@@ -45,6 +45,7 @@ github.com/stretchr/objx
 ## explicit; go 1.17
 github.com/stretchr/testify/assert
 github.com/stretchr/testify/mock
+github.com/stretchr/testify/require
 # go.temporal.io/api v1.36.0
 ## explicit; go 1.20
 go.temporal.io/api/batch/v1
@@ -101,6 +102,7 @@ go.temporal.io/sdk/internal/log
 go.temporal.io/sdk/internal/protocol
 go.temporal.io/sdk/log
 go.temporal.io/sdk/temporal
+go.temporal.io/sdk/testsuite
 go.temporal.io/sdk/worker
 go.temporal.io/sdk/workflow
 # golang.org/x/exp v0.0.0-20231127185646-65229373498e
