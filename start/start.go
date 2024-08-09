@@ -38,7 +38,7 @@ func main() {
 	}
 
 	options := client.StartWorkflowOptions{
-		//ID:        "gift-card-order-045",
+		ID:        "gift-card-order-045",
 		TaskQueue: models.GiftCardTaskQueueName,
 	}
 
