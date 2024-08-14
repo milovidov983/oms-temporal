@@ -15,6 +15,9 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/milovidov983/oms-temporal/internal"
 	"github.com/milovidov983/oms-temporal/internal/cartorder"
+	"github.com/milovidov983/oms-temporal/internal/signals"
+	"github.com/milovidov983/oms-temporal/internal/signals/channels"
+	"github.com/milovidov983/oms-temporal/internal/signals/routes"
 	"github.com/milovidov983/oms-temporal/pkg/models"
 	"go.temporal.io/sdk/client"
 )
@@ -22,6 +25,12 @@ import (
 type (
 	ErrorResponse struct {
 		Message string
+	}
+	CommentRequest struct {
+		Comment string `json:"comment"`
+	}
+	ReasonRequest struct {
+		Reason string `json:"reason"`
 	}
 )
 
@@ -42,9 +51,9 @@ func main() {
 	r.Handle("/order", http.HandlerFunc(CreateOrderHandler)).Methods("POST")
 	r.Handle("/order/{workflowID}", http.HandlerFunc(GetOrderHandler)).Methods("GET")
 	r.Handle("/order/{workflowID}/assembly", http.HandlerFunc(CompleteAssemblyHandler)).Methods("PUT")
-	r.Handle("/order/{workflowID}/assembly-comment", http.HandlerFunc(AssemblyCommentOrderHandler)).Methods("PUT")
-	r.Handle("/cart/{workflowID}/delivery", http.HandlerFunc(DeliveryOrderHandler)).Methods("PUT")
-	r.Handle("/cart/{workflowID}/delivery-comment", http.HandlerFunc(DeliveryCommentOrderHandler)).Methods("PUT")
+	r.Handle("/order/{workflowID}/assembly-comment", http.HandlerFunc(ChangeAssemblyCommentHandler)).Methods("PUT")
+	r.Handle("/cart/{workflowID}/delivery", http.HandlerFunc(CompleteDeliveryHandler)).Methods("PUT")
+	r.Handle("/cart/{workflowID}/delivery-comment", http.HandlerFunc(ChangeDeliveryCommentHandler)).Methods("PUT")
 	r.Handle("/cart/{workflowID}/cancel", http.HandlerFunc(CancelOrderHandler)).Methods("PUT")
 
 	r.NotFoundHandler = http.HandlerFunc(NotFoundHandler)
@@ -73,8 +82,9 @@ func CreateOrderHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	order := models.OrderState{
-		OrderID:   orderID,
-		Status:    models.OrderStatusCreated,
+		OrderID: orderID,
+		Status:  models.OrderStatusCreated,
+		// example
 		Ordered:   []models.OrderLines{models.OrderLines{ProductID: 42, Quantity: 1, Price: 100}},
 		Collected: make([]models.OrderLines, 0),
 		Delivered: make([]models.OrderLines, 0),
@@ -113,18 +123,25 @@ func GetOrderHandler(w http.ResponseWriter, r *http.Request) {
 
 func CompleteAssemblyHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	var collected models.OrderLines
+	var collected []models.OrderLines
 	if err := json.NewDecoder(r.Body).Decode(&collected); err != nil {
 		WriteError(w, err)
 		return
 	}
 
-	update := internal.SignalPayloadCompleteAssembly{
-		Route:     internal.RouteTypes.COMPLETE_ASSEMBLY,
+	update := signals.SignalPayloadCompleteAssembly{
+		Route:     routes.RouteTypeCompleteAssembly,
 		Collected: collected,
 	}
+	signalName := channels.SignalNameCompleteAssemblyChannel
+	workflowID := vars["workflowID"]
 
-	err := temporal.SignalWorkflow(r.Context(), vars["workflowID"], "", internal.SignalChannels.COMPLETE_ASSEMBLY_CHANNEL, update)
+	err := temporal.SignalWorkflow(r.Context(), workflowID, "", signalName, update)
+
+	if errors.Is(err, internal.ErrWrongStatus) {
+		WriteBadRequest(w, err)
+		return
+	}
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -136,21 +153,118 @@ func CompleteAssemblyHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(res)
 }
 
-func ChangeAssemblyComment(w http.ResponseWriter, r *http.Request) {
+func ChangeAssemblyCommentHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	var comment string
-	if err := json.NewDecoder(r.Body).Decode(&comment); err != nil {
+	var requestBody CommentRequest
+	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
 		WriteError(w, err)
 		return
 	}
 
-	update := internal.SignalPayloadChangeAssemblyComment{
-		Route:   internal.RouteTypes.CHANGE_ASSEMBLY_COMMENT,
-		Comment: comment,
+	update := signals.SignalPayloadChangeAssemblyComment{
+		Route:   routes.RouteTypeChangeAssemblyComment,
+		Comment: requestBody.Comment,
+	}
+	signalName := channels.SignalNameChangeAssemblyCommentChannel
+	workflowID := vars["workflowID"]
+
+	err := temporal.SignalWorkflow(r.Context(), workflowID, "", signalName, update)
+
+	if errors.Is(err, internal.ErrWrongStatus) {
+		WriteBadRequest(w, err)
+		return
+	}
+	if err != nil {
+		WriteError(w, err)
+		return
 	}
 
-	signalName := internal.SignalChannels.CHANGE_ASSEMBLY_COMMENT_CHANNEL
-	err := temporal.SignalWorkflow(r.Context(), vars["workflowID"], "", signalName, update)
+	w.WriteHeader(http.StatusOK)
+	res := make(map[string]interface{})
+	res["ok"] = 1
+	json.NewEncoder(w).Encode(res)
+}
+
+func CompleteDeliveryHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	var delivered []models.OrderLines
+	if err := json.NewDecoder(r.Body).Decode(&delivered); err != nil {
+		WriteError(w, err)
+		return
+	}
+
+	update := signals.SignalPayloadCompleteDelivery{
+		Route:     routes.RouteTypeCompleteDelivery,
+		Delivered: delivered,
+	}
+	signalName := channels.SignalNameCompleteDeliveryChannel
+	workflowID := vars["workflowID"]
+
+	err := temporal.SignalWorkflow(r.Context(), workflowID, "", signalName, update)
+
+	if errors.Is(err, internal.ErrWrongStatus) {
+		WriteBadRequest(w, err)
+		return
+	}
+	if err != nil {
+		WriteError(w, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	res := make(map[string]interface{})
+	res["ok"] = 1
+	json.NewEncoder(w).Encode(res)
+}
+
+func ChangeDeliveryCommentHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	var requestBody CommentRequest
+	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+		WriteError(w, err)
+		return
+	}
+
+	update := signals.SignalPayloadChangeDeliveryComment{
+		Route:   routes.RouteTypeChangeDeliveryComment,
+		Comment: requestBody.Comment,
+	}
+	signalName := channels.SignalNameChangeDeliveryCommentChannel
+	workflowID := vars["workflowID"]
+
+	err := temporal.SignalWorkflow(r.Context(), workflowID, "", signalName, update)
+
+	if errors.Is(err, internal.ErrWrongStatus) {
+		WriteBadRequest(w, err)
+		return
+	}
+	if err != nil {
+		WriteError(w, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	res := make(map[string]interface{})
+	res["ok"] = 1
+	json.NewEncoder(w).Encode(res)
+}
+
+func CancelOrderHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	var requestBody ReasonRequest
+	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+		WriteError(w, err)
+		return
+	}
+
+	update := signals.SignalPayloadCancelOrder{
+		Route:  routes.RouteTypeCancelOrder,
+		Reason: requestBody.Reason,
+	}
+	signalName := channels.SignalNameCancelOrderChannel
+	workflowID := vars["workflowID"]
+
+	err := temporal.SignalWorkflow(r.Context(), workflowID, "", signalName, update)
 
 	if errors.Is(err, internal.ErrWrongStatus) {
 		WriteBadRequest(w, err)
