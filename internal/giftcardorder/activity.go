@@ -1,4 +1,4 @@
-package gift_card
+package giftcardorder
 
 import (
 	"context"

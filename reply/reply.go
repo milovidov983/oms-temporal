@@ -4,7 +4,7 @@ import (
 	"context"
 	"log"
 
-	"github.com/milovidov983/oms-temporal/internal/gift_card"
+	"github.com/milovidov983/oms-temporal/internal/giftcardorder"
 	"go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/history/v1"
 	"go.temporal.io/sdk/client"
@@ -45,6 +45,6 @@ func ReplayWorkflow(ctx context.Context, client client.Client, id, runID string)
 		return err
 	}
 	replayer := worker.NewWorkflowReplayer()
-	replayer.RegisterWorkflow(gift_card.Processing)
+	replayer.RegisterWorkflow(giftcardorder.Processing)
 	return replayer.ReplayWorkflowHistory(nil, hist)
 }

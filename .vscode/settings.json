@@ -1,5 +1,8 @@
 {
     "cSpell.words": [
+        "cartorder",
+        "giftcardorder",
+        "httpx",
         "Idempotency",
         "Retryable",
         "retrypolicy",
