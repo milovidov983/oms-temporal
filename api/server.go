@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/bojanz/httpx"
@@ -22,20 +21,8 @@ import (
 	"go.temporal.io/sdk/client"
 )
 
-type (
-	ErrorResponse struct {
-		Message string
-	}
-	CommentRequest struct {
-		Comment string `json:"comment"`
-	}
-	ReasonRequest struct {
-		Reason string `json:"reason"`
-	}
-)
-
 var (
-	HTTPPort = os.Getenv("PORT")
+	HTTPPort = "8888" //os.Getenv("PORT")
 	temporal client.Client
 )
 
@@ -155,7 +142,7 @@ func CompleteAssemblyHandler(w http.ResponseWriter, r *http.Request) {
 
 func ChangeAssemblyCommentHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	var requestBody CommentRequest
+	var requestBody models.CommentRequest
 	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
 		WriteError(w, err)
 		return
@@ -219,7 +206,7 @@ func CompleteDeliveryHandler(w http.ResponseWriter, r *http.Request) {
 
 func ChangeDeliveryCommentHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	var requestBody CommentRequest
+	var requestBody models.CommentRequest
 	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
 		WriteError(w, err)
 		return
@@ -251,7 +238,7 @@ func ChangeDeliveryCommentHandler(w http.ResponseWriter, r *http.Request) {
 
 func CancelOrderHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	var requestBody ReasonRequest
+	var requestBody models.ReasonRequest
 	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
 		WriteError(w, err)
 		return
@@ -283,18 +270,18 @@ func CancelOrderHandler(w http.ResponseWriter, r *http.Request) {
 
 func NotFoundHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotFound)
-	res := ErrorResponse{Message: "Endpoint not found"}
+	res := models.ErrorResponse{Message: "Endpoint not found"}
 	json.NewEncoder(w).Encode(res)
 }
 
 func WriteBadRequest(w http.ResponseWriter, err error) {
 	w.WriteHeader(http.StatusBadRequest)
-	res := ErrorResponse{Message: err.Error()}
+	res := models.ErrorResponse{Message: err.Error()}
 	json.NewEncoder(w).Encode(res)
 }
 
 func WriteError(w http.ResponseWriter, err error) {
 	w.WriteHeader(http.StatusInternalServerError)
-	res := ErrorResponse{Message: err.Error()}
+	res := models.ErrorResponse{Message: err.Error()}
 	json.NewEncoder(w).Encode(res)
 }
