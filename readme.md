@@ -1,9 +1,9 @@
-# Readme
+# OMS MVP
 
+Пример OMS на Temporal
 
+TODO:
 
-Чтобы использовать локальную версию при сборке, используйте флаг -mod=vendor:
-`go build -mod=vendor`
-Или установите переменную окружения:
-`export GOFLAGS="-mod=vendor"`
+ -[ ] Сделать дочерний workflow для этапа сборки
+ -[ ] Сделать дочерний workflow для этапа доставки
 
