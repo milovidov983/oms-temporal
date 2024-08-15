@@ -36,13 +36,9 @@ import (
 // Context's methods may be called by multiple goroutines simultaneously.
 type Context = internal.Context
 
-// ContextAware is an optional interface that can be implemented alongside
-// DataConverter. This interface allows Temporal to pass Workflow/Activity
-// contexts to the DataConverter so that it may tailor it's behaviour.
-//
-// Note that data converters may be called in non-context-aware situations to
-// convert payloads that may not be customized per context. Data converter
-// implementers should not expect or require contextual data be present.
+// ContextAware is an optional interface that can be implemented alongside DataConverter.
+// This interface allows Temporal to pass Workflow/Activity contexts to the DataConverter
+// so that it may tailor it's behaviour.
 type ContextAware = internal.ContextAware
 
 // ErrCanceled is the error returned by Context.Err when the context is canceled.
@@ -81,7 +77,7 @@ func WithValue(parent Context, key interface{}, val interface{}) Context {
 //  err := workflow.ExecuteActivity(ctx, ActivityFoo).Get(ctx, &activityFooResult)
 //  if err != nil && temporal.IsCanceledError(ctx.Err()) {
 //    // activity failed, and workflow context is canceled
-//    disconnectedCtx, _ := workflow.NewDisconnectedContext(ctx);
+//    disconnectedCtx, _ := workflow.newDisconnectedContext(ctx);
 //    workflow.ExecuteActivity(disconnectedCtx, handleCancellationActivity).Get(disconnectedCtx, nil)
 //    return err // workflow return CanceledError
 //  }

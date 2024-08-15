@@ -25,37 +25,46 @@
 package serializer
 
 import (
-	"google.golang.org/protobuf/encoding/protojson"
-	"google.golang.org/protobuf/proto"
+	"bytes"
+
+	"github.com/gogo/protobuf/jsonpb"
+	"github.com/gogo/protobuf/proto"
 )
 
 type (
 	// JSONPBEncoder is JSON encoder/decoder for protobuf structs and slices of protobuf structs.
+	// This is an wrapper on top of jsonpb.Marshaler which supports not only single object serialization
+	// but also slices of concrete objects.
 	JSONPBEncoder struct {
-		opts protojson.MarshalOptions
+		marshaler   jsonpb.Marshaler
+		unmarshaler jsonpb.Unmarshaler
 	}
 )
 
 // NewJSONPBEncoder creates a new JSONPBEncoder.
-func NewJSONPBEncoder() JSONPBEncoder {
-	return JSONPBEncoder{}
+func NewJSONPBEncoder() *JSONPBEncoder {
+	return &JSONPBEncoder{
+		marshaler:   jsonpb.Marshaler{},
+		unmarshaler: jsonpb.Unmarshaler{},
+	}
 }
 
 // NewJSONPBIndentEncoder creates a new JSONPBEncoder with indent.
-func NewJSONPBIndentEncoder(indent string) JSONPBEncoder {
-	return JSONPBEncoder{
-		opts: protojson.MarshalOptions{
-			Indent: indent,
-		},
+func NewJSONPBIndentEncoder(indent string) *JSONPBEncoder {
+	return &JSONPBEncoder{
+		marshaler:   jsonpb.Marshaler{Indent: indent},
+		unmarshaler: jsonpb.Unmarshaler{},
 	}
 }
 
 // Encode protobuf struct to bytes.
-func (e JSONPBEncoder) Encode(pb proto.Message) ([]byte, error) {
-	return e.opts.Marshal(pb)
+func (e *JSONPBEncoder) Encode(pb proto.Message) ([]byte, error) {
+	var buf bytes.Buffer
+	err := e.marshaler.Marshal(&buf, pb)
+	return buf.Bytes(), err
 }
 
 // Decode bytes to protobuf struct.
-func (e JSONPBEncoder) Decode(data []byte, pb proto.Message) error {
-	return protojson.Unmarshal(data, pb)
+func (e *JSONPBEncoder) Decode(data []byte, pb proto.Message) error {
+	return e.unmarshaler.Unmarshal(bytes.NewReader(data), pb)
 }

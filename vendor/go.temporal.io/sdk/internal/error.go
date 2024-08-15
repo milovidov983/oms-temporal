@@ -28,7 +28,6 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"strings"
 	"time"
 
 	commonpb "go.temporal.io/api/common/v1"
@@ -44,12 +43,12 @@ and actual error which caused activity failure. This internal error can be unwra
 Below are the possible types of internal error:
 1) *ApplicationError: (this should be the most common one)
 	*ApplicationError can be returned in two cases:
-		- If activity implementation returns *ApplicationError by using NewApplicationError()/NewNonRetryableApplicationError() API.
-		  The error would contain a message and optional details. Workflow code could extract details to string typed variable, determine
-		  what kind of error it was, and take actions based on it. The details are encoded payload therefore, workflow code needs to know what
-          the types of the encoded details are before extracting them.
+		- If activity implementation returns *ApplicationError by using NewApplicationError() API.
+		  The err would contain a message, details, and NonRetryable flag. Workflow code could check this flag and details to determine
+		  what kind of error it was and take actions based on it. The details is encoded payload which workflow code could extract
+		  to strong typed variable. Workflow code needs to know what the types of the encoded details are before extracting them.
 		- If activity implementation returns errors other than from NewApplicationError() API. In this case GetOriginalType()
-		  will return original type of error represented as string. Workflow code could check this type to determine what kind of error it was
+		  will return orginal type of an error represented as string. Workflow code could check this type to determine what kind of error it was
 		  and take actions based on the type. These errors are retryable by default, unless error type is specified in retry policy.
 2) *CanceledError:
 	If activity was canceled, internal error will be an instance of *CanceledError. When activity cancels itself by
@@ -59,18 +58,19 @@ Below are the possible types of internal error:
 	details about what type of timeout it was.
 4) *PanicError:
 	If activity code panic while executing, temporal activity worker will report it as activity failure to temporal server.
-	The SDK will present that failure as *PanicError. The error contains a string	representation of the panic message and
+	The SDK will present that failure as *PanicError. The err contains a string	representation of the panic message and
 	the call stack when panic was happen.
+
 Workflow code could handle errors based on different types of error. Below is sample code of how error handling looks like.
 
 err := workflow.ExecuteActivity(ctx, MyActivity, ...).Get(ctx, nil)
 if err != nil {
 	var applicationErr *ApplicationError
 	if errors.As(err, &applicationError) {
-		// retrieve error message
-		fmt.Println(applicationError.Error())
-
 		// handle activity errors (created via NewApplicationError() API)
+		if !applicationErr.NonRetryable() {
+			// manually retry activity
+		}
 		var detailMsg string // assuming activity return error by NewApplicationError("message", true, "string details")
 		applicationErr.Details(&detailMsg) // extract strong typed details
 
@@ -94,12 +94,12 @@ if err != nil {
 	if errors.As(err, &timeoutErr) {
 		// handle timeout, could check timeout type by timeoutErr.TimeoutType()
         switch err.TimeoutType() {
-        case enumspb.TIMEOUT_TYPE_SCHEDULE_TO_START:
-			// Handle ScheduleToStart timeout.
-        case enumspb.TIMEOUT_TYPE_START_TO_CLOSE:
-            // Handle StartToClose timeout.
-        case enumspb.TIMEOUT_TYPE_HEARTBEAT:
-            // Handle heartbeat timeout.
+        case commonpb.ScheduleToStart:
+                // Handle ScheduleToStart timeout.
+        case commonpb.StartToClose:
+                // Handle StartToClose timeout.
+        case commonpb.Heartbeat:
+                // Handle heartbeat timeout.
         default:
         }
 	}
@@ -109,42 +109,24 @@ if err != nil {
 		// handle panic, message and stack trace are available by panicErr.Error() and panicErr.StackTrace()
 	}
 }
-Errors from child workflow should be handled in a similar way, except that instance of *ChildWorkflowExecutionError is returned to
-workflow code. It might contain *ActivityError in case if error comes from activity (which in turn will contain on of the errors above),
-or *ApplicationError in case if error comes from child workflow itself.
 
+Errors from child workflow should be handled in a similar way, except that instance of *ChildWorkflowExecutionError is returned to
+workflow code. It will contains *ActivityError, which in turn will contains on of the errors above.
 When panic happen in workflow implementation code, SDK catches that panic and causing the workflow task timeout.
 That workflow task will be retried at a later time (with exponential backoff retry intervals).
-Workflow consumers will get an instance of *WorkflowExecutionError. This error will contain one of errors above.
+
+Workflow consumers will get an instance of *WorkflowExecutionError. This error will contains one of errors above.
 */
 
 type (
-	// ApplicationErrorOptions represents a combination of error attributes and additional requests.
-	// All fields are optional, providing flexibility in error customization.
-	ApplicationErrorOptions struct {
-		// NonRetryable indicates if the error should not be retried regardless of the retry policy.
-		NonRetryable bool
-		// Cause is the original error that caused this error.
-		Cause error
-		// Details is a list of arbitrary values that can be used to provide additional context to the error.
-		Details []interface{}
-		// NextRetryInterval is a request from server to override retry interval calculated by the
-		// server according to the RetryPolicy set by the Workflow.
-		// It is impossible to specify immediate retry as it is indistinguishable from the default value. As a
-		// workaround you could set NextRetryDelay to some small value.
-		// NOTE: This option is supported by Temporal Server >= v1.24.2 older version will ignore this value.
-		NextRetryDelay time.Duration
-	}
-
 	// ApplicationError returned from activity implementations with message and optional details.
 	ApplicationError struct {
 		temporalError
-		msg            string
-		errType        string
-		nonRetryable   bool
-		cause          error
-		details        converter.EncodedValues
-		nextRetryDelay time.Duration
+		msg          string
+		errType      string
+		nonRetryable bool
+		cause        error
+		details      converter.EncodedValues
 	}
 
 	// TimeoutError returned when activity or child workflow timed out.
@@ -183,39 +165,14 @@ type (
 
 	// ContinueAsNewError contains information about how to continue the workflow as new.
 	ContinueAsNewError struct {
-		// params *ExecuteWorkflowParams
-		WorkflowType        *WorkflowType
-		Input               *commonpb.Payloads
-		Header              *commonpb.Header
-		TaskQueueName       string
-		WorkflowRunTimeout  time.Duration
-		WorkflowTaskTimeout time.Duration
-
-		// Deprecated: WorkflowExecutionTimeout is deprecated and is never set or
-		// used internally.
+		//params *ExecuteWorkflowParams
+		WorkflowType             *WorkflowType
+		Input                    *commonpb.Payloads
+		Header                   *commonpb.Header
+		TaskQueueName            string
 		WorkflowExecutionTimeout time.Duration
-
-		// VersioningIntent specifies whether the continued workflow should run on a worker with a
-		// compatible build ID or not. See VersioningIntent.
-		VersioningIntent VersioningIntent
-
-		// This is by default nil but may be overridden using NewContinueAsNewErrorWithOptions.
-		// It specifies the retry policy which gets carried over to the next run.
-		// If not set, the current workflow's retry policy will be carried over automatically.
-		//
-		// NOTES:
-		// 1. This is always nil when returned from a client as a workflow response.
-		// 2. Unlike other options that can be overridden using WithWorkflowTaskQueue, WithWorkflowRunTimeout, etc.
-		//    we can't introduce an option, say WithWorkflowRetryPolicy, for backward compatibility.
-		//    See #676 or IntegrationTestSuite::TestContinueAsNewWithWithChildWF for more details.
-		RetryPolicy *RetryPolicy
-	}
-
-	// ContinueAsNewErrorOptions specifies optional attributes to be carried over to the next run.
-	ContinueAsNewErrorOptions struct {
-		// RetryPolicy specifies the retry policy to be used for the next run.
-		// If nil, the current workflow's retry policy will be used.
-		RetryPolicy *RetryPolicy
+		WorkflowRunTimeout       time.Duration
+		WorkflowTaskTimeout      time.Duration
 	}
 
 	// UnknownExternalWorkflowExecutionError can be returned when external workflow doesn't exist
@@ -256,36 +213,6 @@ type (
 		cause            error
 	}
 
-	// NexusOperationError is an error returned when a Nexus Operation has failed.
-	//
-	// NOTE: Experimental
-	NexusOperationError struct {
-		// The raw proto failure object this error was created from.
-		Failure *failurepb.Failure
-		// Error message.
-		Message string
-		// ID of the NexusOperationScheduled event.
-		ScheduledEventID int64
-		// Endpoint name.
-		Endpoint string
-		// Service name.
-		Service string
-		// Operation name.
-		Operation string
-		// Operation ID - may be empty if the operation completed synchronously.
-		OperationID string
-		// Chained cause - typically an ApplicationError or a CanceledError.
-		Cause error
-	}
-
-	// ChildWorkflowExecutionAlreadyStartedError is set as the cause of
-	// ChildWorkflowExecutionError when failure is due the child workflow having
-	// already started.
-	ChildWorkflowExecutionAlreadyStartedError struct{}
-
-	// NamespaceNotFoundError is set as the cause when failure is due namespace not found.
-	NamespaceNotFoundError struct{}
-
 	// WorkflowExecutionError is returned from workflow.
 	// Unwrap this error to get actual cause.
 	WorkflowExecutionError struct {
@@ -293,12 +220,6 @@ type (
 		runID        string
 		workflowType string
 		cause        error
-	}
-
-	// ActivityNotRegisteredError is returned if worker doesn't support activity type.
-	ActivityNotRegisteredError struct {
-		activityType   string
-		supportedTypes []string
 	}
 
 	temporalError struct {
@@ -332,33 +253,17 @@ var (
 	// which indicate the activity is not done yet. Then, when the waited human action happened, it needs to trigger something
 	// that could report the activity completed event to temporal server via Client.CompleteActivity() API.
 	ErrActivityResultPending = errors.New("not error: do not autocomplete, using Client.CompleteActivity() to complete")
-
-	// ErrScheduleAlreadyRunning is returned if there's already a running (not deleted) Schedule with the same ID
-	ErrScheduleAlreadyRunning = errors.New("schedule with this ID is already registered")
-
-	// ErrSkipScheduleUpdate is used by a user if they want to skip updating a schedule.
-	ErrSkipScheduleUpdate = errors.New("skip schedule update")
 )
 
 // NewApplicationError create new instance of *ApplicationError with message, type, and optional details.
 func NewApplicationError(msg string, errType string, nonRetryable bool, cause error, details ...interface{}) error {
-	return NewApplicationErrorWithOptions(
-		msg,
-		errType,
-		ApplicationErrorOptions{NonRetryable: nonRetryable, Cause: cause, Details: details},
-	)
-}
-
-func NewApplicationErrorWithOptions(msg string, errType string, options ApplicationErrorOptions) error {
 	applicationErr := &ApplicationError{
-		msg:            msg,
-		errType:        errType,
-		cause:          options.Cause,
-		nonRetryable:   options.NonRetryable,
-		nextRetryDelay: options.NextRetryDelay,
-	}
+		msg:          msg,
+		errType:      errType,
+		nonRetryable: nonRetryable,
+		cause:        cause}
+
 	// When return error to user, use EncodedValues as details and data is ready to be decoded by calling Get
-	details := options.Details
 	if len(details) == 1 {
 		if d, ok := details[0].(*EncodedValues); ok {
 			applicationErr.details = d
@@ -487,40 +392,15 @@ func IsCanceledError(err error) bool {
 // If the workflow main function returns this error then the current execution is ended and
 // the new execution with same workflow ID is started automatically with options
 // provided to this function.
+//  ctx - use context to override any options for the new workflow like run timeout, task timeout, task queue.
+//	  if not mentioned it would use the defaults that the current workflow is using.
+//        ctx := WithWorkflowRunTimeout(ctx, 30 * time.Minute)
+//        ctx := WithWorkflowTaskTimeout(ctx, 5 * time.Second)
+//	  ctx := WithWorkflowTaskQueue(ctx, "example-group")
+//  wfn - workflow function. for new execution it can be different from the currently running.
+//  args - arguments for the new workflow.
 //
-//	 ctx - use context to override any options for the new workflow like run timeout, task timeout, task queue.
-//		  if not mentioned it would use the defaults that the current workflow is using.
-//	       ctx := WithWorkflowRunTimeout(ctx, 30 * time.Minute)
-//	       ctx := WithWorkflowTaskTimeout(ctx, 5 * time.Second)
-//		  ctx := WithWorkflowTaskQueue(ctx, "example-group")
-//	 wfn - workflow function. for new execution it can be different from the currently running.
-//	 args - arguments for the new workflow.
 func NewContinueAsNewError(ctx Context, wfn interface{}, args ...interface{}) error {
-	i := getWorkflowOutboundInterceptor(ctx)
-	// Put header on context before executing
-	ctx = workflowContextWithNewHeader(ctx)
-	return i.NewContinueAsNewError(ctx, wfn, args...)
-}
-
-// NewContinueAsNewErrorWithOptions creates ContinueAsNewError instance with additional options.
-func NewContinueAsNewErrorWithOptions(ctx Context, options ContinueAsNewErrorOptions, wfn interface{}, args ...interface{}) error {
-	err := NewContinueAsNewError(ctx, wfn, args...)
-
-	var continueAsNewErr *ContinueAsNewError
-	if errors.As(err, &continueAsNewErr) {
-		if options.RetryPolicy != nil {
-			continueAsNewErr.RetryPolicy = options.RetryPolicy
-		}
-	}
-
-	return err
-}
-
-func (wc *workflowEnvironmentInterceptor) NewContinueAsNewError(
-	ctx Context,
-	wfn interface{},
-	args ...interface{},
-) error {
 	// Validate type and its arguments.
 	options := getWorkflowEnvOptions(ctx)
 	if options == nil {
@@ -532,27 +412,15 @@ func (wc *workflowEnvironmentInterceptor) NewContinueAsNewError(
 		panic(err)
 	}
 
-	header, err := workflowHeaderPropagated(ctx, options.ContextPropagators)
-	if err != nil {
-		return err
-	}
-
 	return &ContinueAsNewError{
 		WorkflowType:             workflowType,
 		Input:                    input,
-		Header:                   header,
+		Header:                   getWorkflowHeader(ctx, options.ContextPropagators),
 		TaskQueueName:            options.TaskQueueName,
 		WorkflowExecutionTimeout: options.WorkflowExecutionTimeout,
 		WorkflowRunTimeout:       options.WorkflowRunTimeout,
 		WorkflowTaskTimeout:      options.WorkflowTaskTimeout,
-		VersioningIntent:         options.VersioningIntent,
-		RetryPolicy:              nil, // The retry policy can't be propagated like other options due to #676.
 	}
-}
-
-// NewActivityNotRegisteredError creates a new ActivityNotRegisteredError.
-func NewActivityNotRegisteredError(activityType string, supportedTypes []string) error {
-	return &ActivityNotRegisteredError{activityType: activityType, supportedTypes: supportedTypes}
 }
 
 // Error from error interface.
@@ -568,11 +436,6 @@ func (e *ApplicationError) Error() string {
 }
 
 func (e *ApplicationError) message() string {
-	return e.msg
-}
-
-// Message contains just the message string without extras added by Error().
-func (e *ApplicationError) Message() string {
 	return e.msg
 }
 
@@ -606,13 +469,9 @@ func (e *ApplicationError) Unwrap() error {
 	return e.cause
 }
 
-// NextRetryDelay returns the delay to wait before retrying the activity.
-// a zero value means to use the activities retry policy.
-func (e *ApplicationError) NextRetryDelay() time.Duration { return e.nextRetryDelay }
-
 // Error from error interface
 func (e *TimeoutError) Error() string {
-	msg := fmt.Sprintf("%s (type: %s)", e.message(), e.timeoutType)
+	msg := fmt.Sprintf("%s (type: %v)", e.message(), e.timeoutType)
 	if e.cause != nil {
 		msg = fmt.Sprintf("%s: %v", msg, e.cause)
 	}
@@ -620,11 +479,6 @@ func (e *TimeoutError) Error() string {
 }
 
 func (e *TimeoutError) message() string {
-	return e.msg
-}
-
-// Message contains just the message string without extras added by Error().
-func (e *TimeoutError) Message() string {
 	return e.msg
 }
 
@@ -750,11 +604,6 @@ func (e *ServerError) message() string {
 	return e.msg
 }
 
-// Message contains just the message string without extras added by Error().
-func (e *ServerError) Message() string {
-	return e.msg
-}
-
 func (e *ServerError) Unwrap() error {
 	return e.cause
 }
@@ -775,36 +624,6 @@ func (e *ActivityError) Unwrap() error {
 	return e.cause
 }
 
-// ScheduledEventID returns event id of the scheduled workflow task corresponding to the activity.
-func (e *ActivityError) ScheduledEventID() int64 {
-	return e.scheduledEventID
-}
-
-// StartedEventID returns event id of the started workflow task corresponding to the activity.
-func (e *ActivityError) StartedEventID() int64 {
-	return e.startedEventID
-}
-
-// Identity returns identity of the worker that attempted activity execution.
-func (e *ActivityError) Identity() string {
-	return e.identity
-}
-
-// ActivityType returns declared type of the activity.
-func (e *ActivityError) ActivityType() *commonpb.ActivityType {
-	return e.activityType
-}
-
-// ActivityID return assigned identifier for the activity.
-func (e *ActivityError) ActivityID() string {
-	return e.activityID
-}
-
-// RetryState returns details on why activity failed.
-func (e *ActivityError) RetryState() enumspb.RetryState {
-	return e.retryState
-}
-
 // Error from error interface
 func (e *ChildWorkflowExecutionError) Error() string {
 	msg := fmt.Sprintf("%s (type: %s, workflowID: %s, runID: %s, initiatedEventID: %d, startedEventID: %d)",
@@ -823,42 +642,6 @@ func (e *ChildWorkflowExecutionError) Unwrap() error {
 	return e.cause
 }
 
-// Error implements the error interface.
-func (e *NexusOperationError) Error() string {
-	msg := fmt.Sprintf(
-		"%s (endpoint: %q, service: %q, operation: %q, operation ID: %q, scheduledEventID: %d)",
-		e.Message, e.Endpoint, e.Service, e.Operation, e.OperationID, e.ScheduledEventID)
-	if e.Cause != nil {
-		msg = fmt.Sprintf("%s: %v", msg, e.Cause)
-	}
-	return msg
-}
-
-// setFailure implements the failureHolder interface for consistency with other failure based errors..
-func (e *NexusOperationError) setFailure(f *failurepb.Failure) {
-	e.Failure = f
-}
-
-// failure implements the failureHolder interface for consistency with other failure based errors.
-func (e *NexusOperationError) failure() *failurepb.Failure {
-	return e.Failure
-}
-
-// Unwrap returns the Cause associated with this error.
-func (e *NexusOperationError) Unwrap() error {
-	return e.Cause
-}
-
-// Error from error interface
-func (*NamespaceNotFoundError) Error() string {
-	return "namespace not found"
-}
-
-// Error from error interface
-func (*ChildWorkflowExecutionAlreadyStartedError) Error() string {
-	return "child workflow execution already started"
-}
-
 // Error from error interface
 func (e *WorkflowExecutionError) Error() string {
 	msg := fmt.Sprintf("workflow execution error (type: %s, workflowID: %s, runID: %s)",
@@ -871,11 +654,6 @@ func (e *WorkflowExecutionError) Error() string {
 
 func (e *WorkflowExecutionError) Unwrap() error {
 	return e.cause
-}
-
-func (e *ActivityNotRegisteredError) Error() string {
-	supported := strings.Join(e.supportedTypes, ", ")
-	return fmt.Sprintf("unable to find activityType=%v. Supported types: [%v]", e.activityType, supported)
 }
 
 func convertErrDetailsToPayloads(details converter.EncodedValues, dc converter.DataConverter) *commonpb.Payloads {
@@ -942,4 +720,178 @@ func getErrType(err error) string {
 	}
 
 	return t.Name()
+}
+
+// ConvertErrorToFailure converts error to failure.
+func ConvertErrorToFailure(err error, dc converter.DataConverter) *failurepb.Failure {
+	if err == nil {
+		return nil
+	}
+
+	if fh, ok := err.(failureHolder); ok {
+		if fh.failure() != nil {
+			return fh.failure()
+		}
+	}
+
+	failure := &failurepb.Failure{
+		Source: "GoSDK",
+	}
+
+	if m, ok := err.(messenger); ok && m != nil {
+		failure.Message = m.message()
+	} else {
+		failure.Message = err.Error()
+	}
+
+	switch err := err.(type) {
+	case *ApplicationError:
+		failureInfo := &failurepb.ApplicationFailureInfo{
+			Type:         err.errType,
+			NonRetryable: err.nonRetryable,
+			Details:      convertErrDetailsToPayloads(err.details, dc),
+		}
+		failure.FailureInfo = &failurepb.Failure_ApplicationFailureInfo{ApplicationFailureInfo: failureInfo}
+	case *CanceledError:
+		failureInfo := &failurepb.CanceledFailureInfo{
+			Details: convertErrDetailsToPayloads(err.details, dc),
+		}
+		failure.FailureInfo = &failurepb.Failure_CanceledFailureInfo{CanceledFailureInfo: failureInfo}
+	case *PanicError:
+		failureInfo := &failurepb.ApplicationFailureInfo{
+			Type: getErrType(err),
+		}
+		failure.FailureInfo = &failurepb.Failure_ApplicationFailureInfo{ApplicationFailureInfo: failureInfo}
+		failure.StackTrace = err.StackTrace()
+	case *workflowPanicError:
+		failureInfo := &failurepb.ApplicationFailureInfo{
+			Type:         getErrType(&PanicError{}),
+			NonRetryable: true,
+		}
+		failure.FailureInfo = &failurepb.Failure_ApplicationFailureInfo{ApplicationFailureInfo: failureInfo}
+		failure.StackTrace = err.StackTrace()
+	case *TimeoutError:
+		failureInfo := &failurepb.TimeoutFailureInfo{
+			TimeoutType:          err.timeoutType,
+			LastHeartbeatDetails: convertErrDetailsToPayloads(err.lastHeartbeatDetails, dc),
+		}
+		failure.FailureInfo = &failurepb.Failure_TimeoutFailureInfo{TimeoutFailureInfo: failureInfo}
+	case *TerminatedError:
+		failureInfo := &failurepb.TerminatedFailureInfo{}
+		failure.FailureInfo = &failurepb.Failure_TerminatedFailureInfo{TerminatedFailureInfo: failureInfo}
+	case *ServerError:
+		failureInfo := &failurepb.ServerFailureInfo{
+			NonRetryable: err.nonRetryable,
+		}
+		failure.FailureInfo = &failurepb.Failure_ServerFailureInfo{ServerFailureInfo: failureInfo}
+	case *ActivityError:
+		failureInfo := &failurepb.ActivityFailureInfo{
+			ScheduledEventId: err.scheduledEventID,
+			StartedEventId:   err.startedEventID,
+			Identity:         err.identity,
+			ActivityType:     err.activityType,
+			ActivityId:       err.activityID,
+			RetryState:       err.retryState,
+		}
+		failure.FailureInfo = &failurepb.Failure_ActivityFailureInfo{ActivityFailureInfo: failureInfo}
+	case *ChildWorkflowExecutionError:
+		failureInfo := &failurepb.ChildWorkflowExecutionFailureInfo{
+			Namespace: err.namespace,
+			WorkflowExecution: &commonpb.WorkflowExecution{
+				WorkflowId: err.workflowID,
+				RunId:      err.runID,
+			},
+			WorkflowType:     &commonpb.WorkflowType{Name: err.workflowType},
+			InitiatedEventId: err.initiatedEventID,
+			StartedEventId:   err.startedEventID,
+			RetryState:       err.retryState,
+		}
+		failure.FailureInfo = &failurepb.Failure_ChildWorkflowExecutionFailureInfo{ChildWorkflowExecutionFailureInfo: failureInfo}
+	default: // All unknown errors are considered to be retryable ApplicationFailureInfo.
+		failureInfo := &failurepb.ApplicationFailureInfo{
+			Type:         getErrType(err),
+			NonRetryable: false,
+		}
+		failure.FailureInfo = &failurepb.Failure_ApplicationFailureInfo{ApplicationFailureInfo: failureInfo}
+	}
+
+	failure.Cause = ConvertErrorToFailure(errors.Unwrap(err), dc)
+
+	return failure
+}
+
+// ConvertFailureToError converts failure to error.
+func ConvertFailureToError(failure *failurepb.Failure, dc converter.DataConverter) error {
+	if failure == nil {
+		return nil
+	}
+
+	var err error
+
+	if failure.GetApplicationFailureInfo() != nil {
+		applicationFailureInfo := failure.GetApplicationFailureInfo()
+		details := newEncodedValues(applicationFailureInfo.GetDetails(), dc)
+		switch applicationFailureInfo.GetType() {
+		case getErrType(&PanicError{}):
+			err = newPanicError(failure.GetMessage(), failure.GetStackTrace())
+		default:
+			err = NewApplicationError(
+				failure.GetMessage(),
+				applicationFailureInfo.GetType(),
+				applicationFailureInfo.GetNonRetryable(),
+				ConvertFailureToError(failure.GetCause(), dc),
+				details)
+		}
+	} else if failure.GetCanceledFailureInfo() != nil {
+		details := newEncodedValues(failure.GetCanceledFailureInfo().GetDetails(), dc)
+		err = NewCanceledError(details)
+	} else if failure.GetTimeoutFailureInfo() != nil {
+		timeoutFailureInfo := failure.GetTimeoutFailureInfo()
+		lastHeartbeatDetails := newEncodedValues(timeoutFailureInfo.GetLastHeartbeatDetails(), dc)
+		err = NewTimeoutError(
+			failure.GetMessage(),
+			timeoutFailureInfo.GetTimeoutType(),
+			ConvertFailureToError(failure.GetCause(), dc),
+			lastHeartbeatDetails)
+	} else if failure.GetTerminatedFailureInfo() != nil {
+		err = newTerminatedError()
+	} else if failure.GetServerFailureInfo() != nil {
+		err = NewServerError(failure.GetMessage(), failure.GetServerFailureInfo().GetNonRetryable(), ConvertFailureToError(failure.GetCause(), dc))
+	} else if failure.GetResetWorkflowFailureInfo() != nil {
+		err = NewApplicationError(failure.GetMessage(), "", true, ConvertFailureToError(failure.GetCause(), dc), failure.GetResetWorkflowFailureInfo().GetLastHeartbeatDetails())
+	} else if failure.GetActivityFailureInfo() != nil {
+		activityTaskInfoFailure := failure.GetActivityFailureInfo()
+		err = NewActivityError(
+			activityTaskInfoFailure.GetScheduledEventId(),
+			activityTaskInfoFailure.GetStartedEventId(),
+			activityTaskInfoFailure.GetIdentity(),
+			activityTaskInfoFailure.GetActivityType(),
+			activityTaskInfoFailure.GetActivityId(),
+			activityTaskInfoFailure.GetRetryState(),
+			ConvertFailureToError(failure.GetCause(), dc),
+		)
+	} else if failure.GetChildWorkflowExecutionFailureInfo() != nil {
+		childWorkflowExecutionFailureInfo := failure.GetChildWorkflowExecutionFailureInfo()
+		err = NewChildWorkflowExecutionError(
+			childWorkflowExecutionFailureInfo.GetNamespace(),
+			childWorkflowExecutionFailureInfo.GetWorkflowExecution().GetWorkflowId(),
+			childWorkflowExecutionFailureInfo.GetWorkflowExecution().GetRunId(),
+			childWorkflowExecutionFailureInfo.GetWorkflowType().GetName(),
+			childWorkflowExecutionFailureInfo.GetInitiatedEventId(),
+			childWorkflowExecutionFailureInfo.GetStartedEventId(),
+			childWorkflowExecutionFailureInfo.GetRetryState(),
+			ConvertFailureToError(failure.GetCause(), dc),
+		)
+	}
+
+	if err == nil {
+		// All unknown types are considered to be retryable ApplicationError.
+		err = NewApplicationError(failure.GetMessage(), "", false, ConvertFailureToError(failure.GetCause(), dc))
+	}
+
+	if fh, ok := err.(failureHolder); ok {
+		fh.setFailure(failure)
+	}
+
+	return err
 }

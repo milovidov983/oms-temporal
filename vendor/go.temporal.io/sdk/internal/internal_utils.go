@@ -35,9 +35,10 @@ import (
 	"syscall"
 	"time"
 
-	"go.temporal.io/sdk/internal/common/metrics"
-	"go.temporal.io/sdk/internal/common/retry"
+	"github.com/uber-go/tally"
 	"google.golang.org/grpc/metadata"
+
+	"go.temporal.io/sdk/internal/common/metrics"
 )
 
 const (
@@ -64,7 +65,7 @@ type grpcContextBuilder struct {
 	//   - context fields, accessible via `ctx.Value(key)`
 	ParentContext context.Context
 
-	MetricsHandler metrics.Handler
+	MetricsScope tally.Scope
 
 	Headers metadata.MD
 
@@ -79,10 +80,10 @@ func (cb *grpcContextBuilder) Build() (context.Context, context.CancelFunc) {
 	if cb.Headers != nil {
 		ctx = metadata.NewOutgoingContext(ctx, cb.Headers)
 	}
-	if cb.MetricsHandler != nil {
-		ctx = context.WithValue(ctx, metrics.HandlerContextKey{}, cb.MetricsHandler)
+	if cb.MetricsScope != nil {
+		ctx = context.WithValue(ctx, metrics.ScopeContextKey, cb.MetricsScope)
 	}
-	ctx = context.WithValue(ctx, metrics.LongPollContextKey{}, cb.IsLongPoll)
+	ctx = context.WithValue(ctx, metrics.LongPollContextKey, cb.IsLongPoll)
 	var cancel context.CancelFunc
 	if cb.Timeout != time.Duration(0) {
 		ctx, cancel = context.WithTimeout(ctx, cb.Timeout)
@@ -97,9 +98,9 @@ func grpcTimeout(timeout time.Duration) func(builder *grpcContextBuilder) {
 	}
 }
 
-func grpcMetricsHandler(metricsHandler metrics.Handler) func(builder *grpcContextBuilder) {
+func grpcMetricsScope(metricsScope tally.Scope) func(builder *grpcContextBuilder) {
 	return func(b *grpcContextBuilder) {
-		b.MetricsHandler = metricsHandler
+		b.MetricsScope = metricsScope
 	}
 }
 
@@ -107,16 +108,6 @@ func grpcLongPoll(isLongPoll bool) func(builder *grpcContextBuilder) {
 	return func(b *grpcContextBuilder) {
 		b.IsLongPoll = isLongPoll
 	}
-}
-
-func grpcContextValue(key interface{}, val interface{}) func(builder *grpcContextBuilder) {
-	return func(b *grpcContextBuilder) {
-		b.ParentContext = context.WithValue(b.ParentContext, key, val)
-	}
-}
-
-func defaultGrpcRetryParameters(ctx context.Context) func(builder *grpcContextBuilder) {
-	return grpcContextValue(retry.ConfigKey, createDynamicServiceRetryPolicy(ctx).GrpcRetryConfig())
 }
 
 // newGRPCContext - Get context for gRPC calls.

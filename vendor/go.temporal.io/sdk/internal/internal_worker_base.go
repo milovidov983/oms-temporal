@@ -30,15 +30,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
-	"sync/atomic"
 	"time"
 
+	"github.com/uber-go/tally"
 	commonpb "go.temporal.io/api/common/v1"
 	"go.temporal.io/api/serviceerror"
 	"golang.org/x/time/rate"
-
-	"go.temporal.io/sdk/internal/common/retry"
 
 	"go.temporal.io/sdk/converter"
 	"go.temporal.io/sdk/internal/common/backoff"
@@ -47,18 +46,12 @@ import (
 )
 
 const (
-	retryPollOperationInitialInterval         = 200 * time.Millisecond
-	retryPollOperationMaxInterval             = 10 * time.Second
-	retryPollResourceExhaustedInitialInterval = time.Second
-	retryPollResourceExhaustedMaxInterval     = 10 * time.Second
-	// How long the same poll task error can remain suppressed
-	lastPollTaskErrSuppressTime = 1 * time.Minute
+	retryPollOperationInitialInterval = 20 * time.Millisecond
+	retryPollOperationMaxInterval     = 10 * time.Second
 )
 
 var (
-	pollOperationRetryPolicy         = createPollRetryPolicy()
-	pollResourceExhaustedRetryPolicy = createPollResourceExhaustedRetryPolicy()
-	retryLongPollGracePeriod         = 2 * time.Minute
+	pollOperationRetryPolicy = createPollRetryPolicy()
 )
 
 var errStop = errors.New("worker stopping")
@@ -77,14 +70,6 @@ type (
 		Backoff time.Duration
 	}
 
-	executeNexusOperationParams struct {
-		client      NexusClient
-		operation   string
-		input       *commonpb.Payload
-		options     NexusOperationOptions
-		nexusHeader map[string]string
-	}
-
 	// WorkflowEnvironment Represents the environment for workflow.
 	// Should only be used within the scope of workflow definition.
 	WorkflowEnvironment interface {
@@ -94,58 +79,25 @@ type (
 		SideEffect(f func() (*commonpb.Payloads, error), callback ResultHandler)
 		GetVersion(changeID string, minSupported, maxSupported Version) Version
 		WorkflowInfo() *WorkflowInfo
-		TypedSearchAttributes() SearchAttributes
 		Complete(result *commonpb.Payloads, err error)
 		RegisterCancelHandler(handler func())
 		RequestCancelChildWorkflow(namespace, workflowID string)
 		RequestCancelExternalWorkflow(namespace, workflowID, runID string, callback ResultHandler)
 		ExecuteChildWorkflow(params ExecuteWorkflowParams, callback ResultHandler, startedHandler func(r WorkflowExecution, e error))
-		ExecuteNexusOperation(params executeNexusOperationParams, callback func(*commonpb.Payload, error), startedHandler func(opID string, e error)) int64
-		RequestCancelNexusOperation(seq int64)
 		GetLogger() log.Logger
-		GetMetricsHandler() metrics.Handler
+		GetMetricsScope() tally.Scope
 		// Must be called before WorkflowDefinition.Execute returns
-		RegisterSignalHandler(
-			handler func(name string, input *commonpb.Payloads, header *commonpb.Header) error,
-		)
-		SignalExternalWorkflow(
-			namespace string,
-			workflowID string,
-			runID string,
-			signalName string,
-			input *commonpb.Payloads,
-			arg interface{},
-			header *commonpb.Header,
-			childWorkflowOnly bool,
-			callback ResultHandler,
-		)
-		RegisterQueryHandler(
-			handler func(queryType string, queryArgs *commonpb.Payloads, header *commonpb.Header) (*commonpb.Payloads, error),
-		)
-		RegisterUpdateHandler(
-			handler func(string, string, *commonpb.Payloads, *commonpb.Header, UpdateCallbacks),
-		)
+		RegisterSignalHandler(handler func(name string, input *commonpb.Payloads))
+		SignalExternalWorkflow(namespace, workflowID, runID, signalName string, input *commonpb.Payloads, arg interface{}, childWorkflowOnly bool, callback ResultHandler)
+		RegisterQueryHandler(handler func(queryType string, queryArgs *commonpb.Payloads) (*commonpb.Payloads, error))
 		IsReplaying() bool
 		MutableSideEffect(id string, f func() interface{}, equals func(a, b interface{}) bool) converter.EncodedValue
 		GetDataConverter() converter.DataConverter
-		GetFailureConverter() converter.FailureConverter
 		AddSession(sessionInfo *SessionInfo)
 		RemoveSession(sessionID string)
 		GetContextPropagators() []ContextPropagator
 		UpsertSearchAttributes(attributes map[string]interface{}) error
-		UpsertTypedSearchAttributes(attributes SearchAttributes) error
-		UpsertMemo(memoMap map[string]interface{}) error
 		GetRegistry() *registry
-		// QueueUpdate request of type name
-		QueueUpdate(name string, f func())
-		// HandleQueuedUpdates unblocks all queued updates of type name
-		HandleQueuedUpdates(name string)
-		// DrainUnhandledUpdates unblocks all updates, meant to be used to drain
-		// all unhandled updates at the end of a workflow task
-		// returns true if any update was unblocked
-		DrainUnhandledUpdates() bool
-		// TryUse returns true if this flag may currently be used.
-		TryUse(flag sdkFlag) bool
 	}
 
 	// WorkflowDefinitionFactory factory for creating WorkflowDefinition instances.
@@ -163,10 +115,9 @@ type (
 		// Application level code must be executed from this function only.
 		// Execute call as well as callbacks called from WorkflowEnvironment functions can only schedule callbacks
 		// which can be executed from OnWorkflowTaskStarted().
-		OnWorkflowTaskStarted(deadlockDetectionTimeout time.Duration)
+		OnWorkflowTaskStarted()
 		// StackTrace of all coroutines owned by the Dispatcher instance.
 		StackTrace() string
-		// Close destroys all coroutines without waiting for their completion
 		Close()
 	}
 
@@ -180,7 +131,6 @@ type (
 		identity          string
 		workerType        string
 		stopTimeout       time.Duration
-		fatalErrCb        func(error)
 		userContextCancel context.CancelFunc
 	}
 
@@ -196,45 +146,17 @@ type (
 		limiterContextCancel func()
 		retrier              *backoff.ConcurrentRetrier // Service errors back off retrier
 		logger               log.Logger
-		metricsHandler       metrics.Handler
-
-		// Must be atomically accessed
-		taskSlotsAvailable      int32
-		taskSlotsAvailableGauge metrics.Gauge
+		metricsScope         tally.Scope
 
 		pollerRequestCh    chan struct{}
 		taskQueueCh        chan interface{}
-		eagerTaskQueueCh   chan eagerTask
-		fatalErrCb         func(error)
 		sessionTokenBucket *sessionTokenBucket
-
-		lastPollTaskErrMessage string
-		lastPollTaskErrStarted time.Time
-		lastPollTaskErrLock    sync.Mutex
 	}
 
 	polledTask struct {
 		task interface{}
 	}
-
-	eagerTask struct {
-		// task to process.
-		task interface{}
-		// callback to run once the task is processed.
-		callback func()
-	}
 )
-
-// SetRetryLongPollGracePeriod sets the amount of time a long poller retries on
-// fatal errors before it actually fails. For test use only,
-// not safe to call with a running worker.
-func SetRetryLongPollGracePeriod(period time.Duration) {
-	retryLongPollGracePeriod = period
-}
-
-func getRetryLongPollGracePeriod() time.Duration {
-	return retryLongPollGracePeriod
-}
 
 func createPollRetryPolicy() backoff.RetryPolicy {
 	policy := backoff.NewExponentialRetryPolicy(retryPollOperationInitialInterval)
@@ -244,45 +166,26 @@ func createPollRetryPolicy() backoff.RetryPolicy {
 	// We use it to calculate next backoff. We have additional layer that is built on poller
 	// in the worker layer for to add some middleware for any poll retry that includes
 	// (a) rate limiting across pollers (b) back-off across pollers when server is busy
-	policy.SetExpirationInterval(retry.UnlimitedInterval) // We don't ever expire
+	policy.SetExpirationInterval(backoff.NoInterval) // We don't ever expire
 	return policy
 }
 
-func createPollResourceExhaustedRetryPolicy() backoff.RetryPolicy {
-	policy := backoff.NewExponentialRetryPolicy(retryPollResourceExhaustedInitialInterval)
-	policy.SetMaximumInterval(retryPollResourceExhaustedMaxInterval)
-	policy.SetExpirationInterval(retry.UnlimitedInterval)
-	return policy
-}
-
-func newBaseWorker(
-	options baseWorkerOptions,
-	logger log.Logger,
-	metricsHandler metrics.Handler,
-	sessionTokenBucket *sessionTokenBucket,
-) *baseWorker {
+func newBaseWorker(options baseWorkerOptions, logger log.Logger, metricsScope tally.Scope, sessionTokenBucket *sessionTokenBucket) *baseWorker {
 	ctx, cancel := context.WithCancel(context.Background())
 	bw := &baseWorker{
-		options:            options,
-		stopCh:             make(chan struct{}),
-		taskLimiter:        rate.NewLimiter(rate.Limit(options.maxTaskPerSecond), 1),
-		retrier:            backoff.NewConcurrentRetrier(pollOperationRetryPolicy),
-		logger:             log.With(logger, tagWorkerType, options.workerType),
-		metricsHandler:     metricsHandler.WithTags(metrics.WorkerTags(options.workerType)),
-		taskSlotsAvailable: int32(options.maxConcurrentTask),
-		pollerRequestCh:    make(chan struct{}, options.maxConcurrentTask),
-		taskQueueCh:        make(chan interface{}),                          // no buffer, so poller only able to poll new task after previous is dispatched.
-		eagerTaskQueueCh:   make(chan eagerTask, options.maxConcurrentTask), // allow enough capacity so that eager dispatch will not block
-		fatalErrCb:         options.fatalErrCb,
+		options:         options,
+		stopCh:          make(chan struct{}),
+		taskLimiter:     rate.NewLimiter(rate.Limit(options.maxTaskPerSecond), 1),
+		retrier:         backoff.NewConcurrentRetrier(pollOperationRetryPolicy),
+		logger:          log.With(logger, tagWorkerType, options.workerType),
+		metricsScope:    metrics.GetWorkerScope(metricsScope, options.workerType),
+		pollerRequestCh: make(chan struct{}, options.maxConcurrentTask),
+		taskQueueCh:     make(chan interface{}), // no buffer, so poller only able to poll new task after previous is dispatched.
 
 		limiterContext:       ctx,
 		limiterContextCancel: cancel,
 		sessionTokenBucket:   sessionTokenBucket,
 	}
-	// Set secondary retrier as resource exhausted
-	bw.retrier.SetSecondaryRetryPolicy(pollResourceExhaustedRetryPolicy)
-	bw.taskSlotsAvailableGauge = bw.metricsHandler.Gauge(metrics.WorkerTaskSlotsAvailable)
-	bw.taskSlotsAvailableGauge.Update(float64(bw.taskSlotsAvailable))
 	if options.pollerRate > 0 {
 		bw.pollLimiter = rate.NewLimiter(rate.Limit(options.pollerRate), 1)
 	}
@@ -296,7 +199,7 @@ func (bw *baseWorker) Start() {
 		return
 	}
 
-	bw.metricsHandler.Counter(metrics.WorkerStartCounter).Inc(1)
+	bw.metricsScope.Counter(metrics.WorkerStartCounter).Inc(1)
 
 	for i := 0; i < bw.options.pollerCount; i++ {
 		bw.stopWG.Add(1)
@@ -305,9 +208,6 @@ func (bw *baseWorker) Start() {
 
 	bw.stopWG.Add(1)
 	go bw.runTaskDispatcher()
-
-	bw.stopWG.Add(1)
-	go bw.runEagerTaskDispatcher()
 
 	bw.isWorkerStarted = true
 	traceLog(func() {
@@ -330,7 +230,7 @@ func (bw *baseWorker) isStop() bool {
 
 func (bw *baseWorker) runPoller() {
 	defer bw.stopWG.Done()
-	bw.metricsHandler.Counter(metrics.PollerStartCounter).Inc(1)
+	bw.metricsScope.Counter(metrics.PollerStartCounter).Inc(1)
 
 	for {
 		select {
@@ -345,41 +245,6 @@ func (bw *baseWorker) runPoller() {
 	}
 }
 
-func (bw *baseWorker) tryReserveSlot() bool {
-	if bw.isStop() {
-		return false
-	}
-	// Reserve a executor slot via a non-blocking attempt to take a poller
-	// request entry which essentially reserves a slot
-	select {
-	case <-bw.pollerRequestCh:
-		return true
-	default:
-		return false
-	}
-}
-
-func (bw *baseWorker) releaseSlot() {
-	// Like other sends to this channel, we assume there is room because we
-	// reserved it, so we make a blocking send.
-	bw.pollerRequestCh <- struct{}{}
-}
-
-func (bw *baseWorker) pushEagerTask(task eagerTask) {
-	// Should always be non blocking if a slot was reserved.
-	bw.eagerTaskQueueCh <- task
-}
-
-func (bw *baseWorker) processTaskAsync(task interface{}, callback func()) {
-	bw.stopWG.Add(1)
-	go func() {
-		if callback != nil {
-			defer callback()
-		}
-		bw.processTask(task)
-	}()
-}
-
 func (bw *baseWorker) runTaskDispatcher() {
 	defer bw.stopWG.Done()
 
@@ -391,35 +256,17 @@ func (bw *baseWorker) runTaskDispatcher() {
 		// wait for new task or worker stop
 		select {
 		case <-bw.stopCh:
-			// Currently we can drop any tasks received when closing.
-			// https://github.com/temporalio/sdk-go/issues/1197
 			return
 		case task := <-bw.taskQueueCh:
-			// for non-polled-task (local activity result as task or eager task), we don't need to rate limit
+			// for non-polled-task (local activity result as task), we don't need to rate limit
 			_, isPolledTask := task.(*polledTask)
 			if isPolledTask && bw.taskLimiter.Wait(bw.limiterContext) != nil {
 				if bw.isStop() {
 					return
 				}
 			}
-			bw.processTaskAsync(task, nil)
-		}
-	}
-}
-
-func (bw *baseWorker) runEagerTaskDispatcher() {
-	defer bw.stopWG.Done()
-	for {
-		select {
-		case <-bw.stopCh:
-			// drain eager dispatch queue
-			for len(bw.eagerTaskQueueCh) > 0 {
-				eagerTask := <-bw.eagerTaskQueueCh
-				bw.processTaskAsync(eagerTask.task, eagerTask.callback)
-			}
-			return
-		case eagerTask := <-bw.eagerTaskQueueCh:
-			bw.processTaskAsync(eagerTask.task, eagerTask.callback)
+			bw.stopWG.Add(1)
+			go bw.processTask(task)
 		}
 	}
 }
@@ -427,23 +274,23 @@ func (bw *baseWorker) runEagerTaskDispatcher() {
 func (bw *baseWorker) pollTask() {
 	var err error
 	var task interface{}
-	bw.retrier.Throttle(bw.stopCh)
+	bw.retrier.Throttle()
 	if bw.pollLimiter == nil || bw.pollLimiter.Wait(bw.limiterContext) == nil {
 		task, err = bw.options.taskWorker.PollTask()
-		bw.logPollTaskError(err)
+		if err != nil && enableVerboseLogging {
+			bw.logger.Debug("Failed to poll for task.", tagError, err)
+		}
 		if err != nil {
-			// We retry "non retriable" errors while long polling for a while, because some proxies return
-			// unexpected values causing unnecessary downtime.
-			if isNonRetriableError(err) && bw.retrier.GetElapsedTime() > getRetryLongPollGracePeriod() {
+			if isNonRetriableError(err) {
 				bw.logger.Error("Worker received non-retriable error. Shutting down.", tagError, err)
-				if bw.fatalErrCb != nil {
-					bw.fatalErrCb(err)
+				if p, err := os.FindProcess(os.Getpid()); err != nil {
+					bw.logger.Error("Unable to find current process.", "pid", os.Getpid(), tagError, err)
+				} else {
+					_ = p.Signal(os.Interrupt)
 				}
 				return
 			}
-			// We use the secondary retrier on resource exhausted
-			_, resourceExhausted := err.(*serviceerror.ResourceExhausted)
-			bw.retrier.Failed(resourceExhausted)
+			bw.retrier.Failed()
 		} else {
 			bw.retrier.Succeeded()
 		}
@@ -459,38 +306,12 @@ func (bw *baseWorker) pollTask() {
 	}
 }
 
-func (bw *baseWorker) logPollTaskError(err error) {
-	// We do not want to log any errors after we were explicitly stopped
-	select {
-	case <-bw.stopCh:
-		return
-	default:
-	}
-
-	bw.lastPollTaskErrLock.Lock()
-	defer bw.lastPollTaskErrLock.Unlock()
-	// No error means reset the message and time
-	if err == nil {
-		bw.lastPollTaskErrMessage = ""
-		bw.lastPollTaskErrStarted = time.Now()
-		return
-	}
-	// Log the error as warn if it doesn't match the last error seen or its over
-	// the time since
-	if err.Error() != bw.lastPollTaskErrMessage || time.Since(bw.lastPollTaskErrStarted) > lastPollTaskErrSuppressTime {
-		bw.logger.Warn("Failed to poll for task.", tagError, err)
-		bw.lastPollTaskErrMessage = err.Error()
-		bw.lastPollTaskErrStarted = time.Now()
-	}
-}
-
 func isNonRetriableError(err error) bool {
 	if err == nil {
 		return false
 	}
 	switch err.(type) {
 	case *serviceerror.InvalidArgument,
-		*serviceerror.NamespaceNotFound,
 		*serviceerror.ClientVersionNotSupported:
 		return true
 	}
@@ -499,13 +320,6 @@ func isNonRetriableError(err error) bool {
 
 func (bw *baseWorker) processTask(task interface{}) {
 	defer bw.stopWG.Done()
-
-	// Update availability metric
-	bw.taskSlotsAvailableGauge.Update(float64(atomic.AddInt32(&bw.taskSlotsAvailable, -1)))
-	defer func() {
-		bw.taskSlotsAvailableGauge.Update(float64(atomic.AddInt32(&bw.taskSlotsAvailable, 1)))
-	}()
-
 	// If the task is from poller, after processing it we would need to request a new poll. Otherwise, the task is from
 	// local activity worker, we don't need a new poll from server.
 	polledTask, isPolledTask := task.(*polledTask)

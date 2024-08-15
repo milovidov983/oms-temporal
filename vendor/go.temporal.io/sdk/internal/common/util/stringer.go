@@ -28,14 +28,11 @@ import (
 	"bytes"
 	"fmt"
 	"reflect"
-	"regexp"
 
 	commandpb "go.temporal.io/api/command/v1"
 	enumspb "go.temporal.io/api/enums/v1"
 	historypb "go.temporal.io/api/history/v1"
 )
-
-var privateField = regexp.MustCompile("^[a-z]")
 
 func anyToString(d interface{}) string {
 	v := reflect.ValueOf(d)
@@ -48,7 +45,7 @@ func anyToString(d interface{}) string {
 		buf.WriteString("(")
 		for i := 0; i < v.NumField(); i++ {
 			f := v.Field(i)
-			if f.Kind() == reflect.Invalid || privateField.MatchString(t.Field(i).Name) {
+			if f.Kind() == reflect.Invalid {
 				continue
 			}
 			fieldValue := valueToString(f)
@@ -72,9 +69,7 @@ func valueToString(v reflect.Value) string {
 	case reflect.Ptr:
 		return valueToString(v.Elem())
 	case reflect.Struct:
-		if v.CanInterface() {
-			return anyToString(v.Interface())
-		}
+		return anyToString(v.Interface())
 	case reflect.Invalid:
 		return ""
 	case reflect.Slice:
@@ -83,12 +78,8 @@ func valueToString(v reflect.Value) string {
 		}
 		return fmt.Sprintf("[len=%d]", v.Len())
 	default:
-		if v.CanInterface() {
-			return fmt.Sprint(v.Interface())
-		}
+		return fmt.Sprint(v.Interface())
 	}
-
-	return ""
 }
 
 // HistoryEventToString convert HistoryEvent to string

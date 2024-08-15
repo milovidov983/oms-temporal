@@ -41,10 +41,10 @@ Below are the possible types of internal error:
 	*ApplicationError can be returned in two cases:
 		- If activity implementation returns *ApplicationError by using NewApplicationError()/NewNonRetryableApplicationError() API.
 		  The error would contain a message and optional details. Workflow code could extract details to string typed variable, determine
-		  what kind of error it was, and take actions based on it. The details are encoded payload therefore, workflow code needs to know what
+		  what kind of error it was, and take actions based on it. The details is encoded payload therefore, workflow code needs to know what
           the types of the encoded details are before extracting them.
 		- If activity implementation returns errors other than from NewApplicationError() API. In this case GetOriginalType()
-		  will return original type of error represented as string. Workflow code could check this type to determine what kind of error it was
+		  will return orginal type of an error represented as string. Workflow code could check this type to determine what kind of error it was
 		  and take actions based on the type. These errors are retryable by default, unless error type is specified in retry policy.
 2) *CanceledError:
 	If activity was canceled, internal error will be an instance of *CanceledError. When activity cancels itself by
@@ -54,23 +54,23 @@ Below are the possible types of internal error:
 	details about what type of timeout it was.
 4) *PanicError:
 	If activity code panic while executing, temporal activity worker will report it as activity failure to temporal server.
-	The SDK will present that failure as *PanicError. The error contains a string	representation of the panic message and
+	The SDK will present that failure as *PanicError. The err contains a string	representation of the panic message and
 	the call stack when panic was happen.
 Workflow code could handle errors based on different types of error. Below is sample code of how error handling looks like.
 
 err := workflow.ExecuteActivity(ctx, MyActivity, ...).Get(ctx, nil)
 if err != nil {
 	var applicationErr *ApplicationError
-	if errors.As(err, &applicationErr) {
+	if errors.As(err, &applicationError) {
 		// retrieve error message
-		fmt.Println(applicationErr.Error())
+		fmt.Println(applicationError.Error())
 
 		// handle activity errors (created via NewApplicationError() API)
 		var detailMsg string // assuming activity return error by NewApplicationError("message", true, "string details")
 		applicationErr.Details(&detailMsg) // extract strong typed details
 
 		// handle activity errors (errors created other than using NewApplicationError() API)
-		switch applicationErr.Type() {
+		switch err.Type() {
 		case "CustomErrTypeA":
 			// handle CustomErrTypeA
 		case CustomErrTypeB:
@@ -88,15 +88,13 @@ if err != nil {
 	var timeoutErr *TimeoutError
 	if errors.As(err, &timeoutErr) {
 		// handle timeout, could check timeout type by timeoutErr.TimeoutType()
-        switch timeoutErr.TimeoutType() {
-        case enumspb.TIMEOUT_TYPE_SCHEDULE_TO_START:
-			// Handle ScheduleToStart timeout.
-        case enumspb.TIMEOUT_TYPE_SCHEDULE_TO_CLOSE:
-			// Handle ScheduleToClose timeout.
-        case enumspb.TIMEOUT_TYPE_START_TO_CLOSE:
-            // Handle StartToClose timeout.
-        case enumspb.TIMEOUT_TYPE_HEARTBEAT:
-            // Handle heartbeat timeout.
+        switch err.TimeoutType() {
+        case commonpb.ScheduleToStart:
+                // Handle ScheduleToStart timeout.
+        case commonpb.StartToClose:
+                // Handle StartToClose timeout.
+        case commonpb.Heartbeat:
+                // Handle heartbeat timeout.
         default:
         }
 	}
@@ -108,11 +106,11 @@ if err != nil {
 }
 Errors from child workflow should be handled in a similar way, except that instance of *ChildWorkflowExecutionError is returned to
 workflow code. It might contain *ActivityError in case if error comes from activity (which in turn will contain on of the errors above),
-or *ApplicationError in case if error comes from child workflow itself.
+or *ApplicationError in case if error comes from child workflow itslef.
 
 When panic happen in workflow implementation code, SDK catches that panic and causing the workflow task timeout.
 That workflow task will be retried at a later time (with exponential backoff retry intervals).
-Workflow consumers will get an instance of *WorkflowExecutionError. This error will contain one of errors above.
+Workflow consumers will get an instance of *WorkflowExecutionError. This error will contains one of errors above.
 */
 
 type (
@@ -130,19 +128,6 @@ type (
 
 	// ChildWorkflowExecutionError returned from workflow when child workflow returned an error.
 	ChildWorkflowExecutionError = internal.ChildWorkflowExecutionError
-
-	// NexusOperationError is an error returned when a Nexus Operation has failed.
-	//
-	// NOTE: Experimental
-	NexusOperationError = internal.NexusOperationError
-
-	// ChildWorkflowExecutionAlreadyStartedError is set as the cause of
-	// ChildWorkflowExecutionError when failure is due the child workflow having
-	// already started.
-	ChildWorkflowExecutionAlreadyStartedError = internal.ChildWorkflowExecutionAlreadyStartedError
-
-	// NamespaceNotFoundError is set as the cause when failure is due namespace not found.
-	NamespaceNotFoundError = internal.NamespaceNotFoundError
 
 	// WorkflowExecutionError returned from workflow.
 	WorkflowExecutionError = internal.WorkflowExecutionError
@@ -163,31 +148,14 @@ type (
 var (
 	// ErrNoData is returned when trying to extract strong typed data while there is no data available.
 	ErrNoData = internal.ErrNoData
-
-	// ErrScheduleAlreadyRunning can be returned when a schedule ID is reused
-	ErrScheduleAlreadyRunning = internal.ErrScheduleAlreadyRunning
-
-	// ErrSkipScheduleUpdate is used by a user if they want to skip updating a schedule.
-	ErrSkipScheduleUpdate = internal.ErrSkipScheduleUpdate
 )
-
-// ApplicationErrorOptions should be used to set all the desired attributes of a new ApplicationError
-// To get a new instance use ErrorAttributes function
-type ApplicationErrorOptions = internal.ApplicationErrorOptions
-
-// NewApplicationErrorWithOptions creates new instance of *ApplicationError type, all the options of the
-// newly created error could be controlled through instance of ApplicationErrorOptions.
-// The options structure also receives some extra requests. See activity.ApplicationErrorOptions for details.
-func NewApplicationErrorWithOptions(msg, errType string, options ApplicationErrorOptions) error {
-	return internal.NewApplicationErrorWithOptions(msg, errType, options)
-}
 
 // NewApplicationError creates new instance of retryable *ApplicationError with message, type, and optional details.
 // Use ApplicationError for any use case specific errors that cross activity and child workflow boundaries.
 // errType can be used to control if error is retryable or not. Add the same type in to RetryPolicy.NonRetryableErrorTypes
 // to avoid retrying of particular error types.
 func NewApplicationError(message, errType string, details ...interface{}) error {
-	return internal.NewApplicationErrorWithOptions(message, errType, ApplicationErrorOptions{Details: details})
+	return internal.NewApplicationError(message, errType, false, nil, details...)
 }
 
 // NewApplicationErrorWithCause creates new instance of retryable *ApplicationError with message, type, cause, and optional details.
@@ -195,17 +163,13 @@ func NewApplicationError(message, errType string, details ...interface{}) error 
 // errType can be used to control if error is retryable or not. Add the same type in to RetryPolicy.NonRetryableErrorTypes
 // to avoid retrying of particular error types.
 func NewApplicationErrorWithCause(message, errType string, cause error, details ...interface{}) error {
-	return internal.NewApplicationErrorWithOptions(
-		message, errType, ApplicationErrorOptions{NonRetryable: false, Cause: cause, Details: details},
-	)
+	return internal.NewApplicationError(message, errType, false, cause, details...)
 }
 
 // NewNonRetryableApplicationError creates new instance of non-retryable *ApplicationError with message, type, and optional cause and details.
 // Use ApplicationError for any use case specific errors that cross activity and child workflow boundaries.
 func NewNonRetryableApplicationError(message, errType string, cause error, details ...interface{}) error {
-	return internal.NewApplicationErrorWithOptions(
-		message, errType, ApplicationErrorOptions{NonRetryable: true, Cause: cause, Details: details},
-	)
+	return internal.NewApplicationError(message, errType, true, cause, details...)
 }
 
 // NewCanceledError creates CanceledError instance.
@@ -220,15 +184,10 @@ func IsApplicationError(err error) bool {
 	return errors.As(err, &applicationError)
 }
 
-// IsWorkflowExecutionAlreadyStartedError return if the err is a
-// WorkflowExecutionAlreadyStartedError or if an error in the chain is a
-// ChildWorkflowExecutionAlreadyStartedError.
+// IsWorkflowExecutionAlreadyStartedError return if the err is a WorkflowExecutionAlreadyStartedError
 func IsWorkflowExecutionAlreadyStartedError(err error) bool {
-	if _, ok := err.(*serviceerror.WorkflowExecutionAlreadyStarted); ok {
-		return ok
-	}
-	var childError *ChildWorkflowExecutionAlreadyStartedError
-	return errors.As(err, &childError)
+	_, ok := err.(*serviceerror.WorkflowExecutionAlreadyStarted)
+	return ok
 }
 
 // IsCanceledError return if the err is a CanceledError

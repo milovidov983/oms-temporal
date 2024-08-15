@@ -6,3 +6,4 @@
 `go build -mod=vendor`
 Или установите переменную окружения:
 `export GOFLAGS="-mod=vendor"`
+

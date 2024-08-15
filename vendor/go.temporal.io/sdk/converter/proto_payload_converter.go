@@ -36,26 +36,11 @@ import (
 
 // ProtoPayloadConverter converts proto objects to protobuf binary format.
 type ProtoPayloadConverter struct {
-	options ProtoPayloadConverterOptions
 }
 
-// ProtoPayloadConverterOptions represents options for `NewProtoPayloadConverterWithOptions`.
-type ProtoPayloadConverterOptions struct {
-	// ExcludeProtobufMessageTypes prevents the message type (`my.package.MyMessage`)
-	// from being included in the Payload.
-	ExcludeProtobufMessageTypes bool
-}
-
-// NewProtoPayloadConverter creates new instance of `ProtoPayloadConverter“.
+// NewProtoPayloadConverter creates new instance of ProtoPayloadConverter.
 func NewProtoPayloadConverter() *ProtoPayloadConverter {
 	return &ProtoPayloadConverter{}
-}
-
-// NewProtoPayloadConverterWithOptions creates new instance of `ProtoPayloadConverter` with the provided options.
-func NewProtoPayloadConverterWithOptions(options ProtoPayloadConverterOptions) *ProtoPayloadConverter {
-	return &ProtoPayloadConverter{
-		options: options,
-	}
 }
 
 // ToPayload converts single proto value to payload.
@@ -77,14 +62,14 @@ func (c *ProtoPayloadConverter) ToPayload(value interface{}) (*commonpb.Payload,
 			if err != nil {
 				return nil, fmt.Errorf("%w: %v", ErrUnableToEncode, err)
 			}
-			return newProtoPayload(byteSlice, c, string(valueProto.ProtoReflect().Descriptor().FullName())), nil
+			return newPayload(byteSlice, c), nil
 		}
 		if valueGogoProto, ok := value.(gogoproto.Message); ok {
 			data, err := gogoproto.Marshal(valueGogoProto)
 			if err != nil {
 				return nil, fmt.Errorf("%w: %v", ErrUnableToEncode, err)
 			}
-			return newProtoPayload(data, c, gogoproto.MessageName(valueGogoProto)), nil
+			return newPayload(data, c), nil
 		}
 		if builtPointer {
 			break
@@ -108,13 +93,9 @@ func (c *ProtoPayloadConverter) FromPayload(payload *commonpb.Payload, valuePtr 
 		return fmt.Errorf("type: %T: %w", valuePtr, ErrUnableToSetValue)
 	}
 
-	if originalValue.Kind() == reflect.Interface {
-		return fmt.Errorf("value type: %s: %w", originalValue.Type().String(), ErrValuePtrMustConcreteType)
-	}
-
 	value := originalValue
-	// If original value is of value type (i.e. commonpb.WorkflowType), create a pointer to it.
-	if originalValue.Kind() != reflect.Ptr {
+	// In case if original value is of value type (i.e. commonpb.WorkflowType), create a pointer to it.
+	if originalValue.Kind() != reflect.Ptr && originalValue.Kind() != reflect.Interface {
 		value = pointerTo(originalValue.Interface())
 	}
 
@@ -125,7 +106,7 @@ func (c *ProtoPayloadConverter) FromPayload(payload *commonpb.Payload, valuePtr 
 		return fmt.Errorf("type: %T: %w", protoValue, ErrTypeNotImplementProtoMessage)
 	}
 
-	// If original value is nil, create new instance.
+	// If case if original value is nil, create new instance.
 	if originalValue.Kind() == reflect.Ptr && originalValue.IsNil() {
 		value = newOfSameType(originalValue)
 		protoValue = value.Interface()
@@ -163,8 +144,4 @@ func (c *ProtoPayloadConverter) ToString(payload *commonpb.Payload) string {
 // Encoding returns MetadataEncodingProto.
 func (c *ProtoPayloadConverter) Encoding() string {
 	return MetadataEncodingProto
-}
-
-func (c *ProtoPayloadConverter) ExcludeProtobufMessageTypes() bool {
-	return c.options.ExcludeProtobufMessageTypes
 }

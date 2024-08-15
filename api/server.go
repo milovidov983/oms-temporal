@@ -20,13 +20,15 @@ import (
 )
 
 var (
-	HTTPPort = "8888" //os.Getenv("PORT")
+	HTTPPort = "8888"
 	temporal client.Client
 )
 
 func main() {
 	var err error
-	temporal, err = client.NewLazyClient(client.Options{})
+	temporal, err = client.NewClient(client.Options{
+		HostPort: "127.0.0.1:7777",
+	})
 	if err != nil {
 		log.Fatalln("unable to create Temporal client", err)
 	}
@@ -37,9 +39,9 @@ func main() {
 	r.Handle("/order/{workflowID}", http.HandlerFunc(GetOrderHandler)).Methods("GET")
 	r.Handle("/order/{workflowID}/assembly", http.HandlerFunc(CompleteAssemblyHandler)).Methods("PUT")
 	r.Handle("/order/{workflowID}/assembly-comment", http.HandlerFunc(ChangeAssemblyCommentHandler)).Methods("PUT")
-	r.Handle("/cart/{workflowID}/delivery", http.HandlerFunc(CompleteDeliveryHandler)).Methods("PUT")
-	r.Handle("/cart/{workflowID}/delivery-comment", http.HandlerFunc(ChangeDeliveryCommentHandler)).Methods("PUT")
-	r.Handle("/cart/{workflowID}/cancel", http.HandlerFunc(CancelOrderHandler)).Methods("PUT")
+	r.Handle("/order/{workflowID}/delivery", http.HandlerFunc(CompleteDeliveryHandler)).Methods("PUT")
+	r.Handle("/order/{workflowID}/delivery-comment", http.HandlerFunc(ChangeDeliveryCommentHandler)).Methods("PUT")
+	r.Handle("/order/{workflowID}/cancel", http.HandlerFunc(CancelOrderHandler)).Methods("PUT")
 
 	r.NotFoundHandler = http.HandlerFunc(NotFoundHandler)
 
@@ -58,31 +60,35 @@ func main() {
 }
 
 func CreateOrderHandler(w http.ResponseWriter, r *http.Request) {
+	var requestBody models.OrderState
+	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+		WriteError(w, err)
+		return
+	}
+
 	orderID := fmt.Sprintf("%d", time.Now().Unix())
 	workflowID := "ORDER-" + orderID
+	requestBody.OrderID = orderID
 
 	options := client.StartWorkflowOptions{
 		ID:        workflowID,
 		TaskQueue: "ORDER_TASK_QUEUE",
 	}
 
-	order := models.OrderState{
-		OrderID: orderID,
-		Status:  models.OrderStatusCreated,
-		// example
-		Ordered:   []models.OrderLines{models.OrderLines{ProductID: 42, Quantity: 1, Price: 100}},
-		Collected: make([]models.OrderLines, 0),
-		Delivered: make([]models.OrderLines, 0),
+	we, err := temporal.ExecuteWorkflow(r.Context(), options, cartorder.CartOrderWorkflow, requestBody)
+	if err != nil {
+		WriteError(w, err)
+		return
 	}
 
-	we, err := temporal.ExecuteWorkflow(r.Context(), options, cartorder.CartOrderWorkflow, order)
+	err = temporal.SignalWorkflow(r.Context(), workflowID, "", channels.SignalNameCreateOrderChannel, struct{}{})
 	if err != nil {
 		WriteError(w, err)
 		return
 	}
 
 	res := make(map[string]interface{})
-	res["order"] = order
+	res["order"] = requestBody
 	res["workflowID"] = we.GetID()
 
 	w.WriteHeader(http.StatusCreated)
@@ -267,6 +273,7 @@ func WriteBadRequest(w http.ResponseWriter, err error) {
 }
 
 func WriteError(w http.ResponseWriter, err error) {
+	log.Printf("[error] %v", err)
 	w.WriteHeader(http.StatusInternalServerError)
 	res := models.ErrorResponse{Message: err.Error()}
 	json.NewEncoder(w).Encode(res)

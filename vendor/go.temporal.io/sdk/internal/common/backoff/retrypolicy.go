@@ -28,24 +28,29 @@ import (
 	"math"
 	"math/rand"
 	"time"
-
-	"go.temporal.io/sdk/internal/common/retry"
 )
 
 const (
-	done time.Duration = -1
+	// NoInterval represents Maximim interval
+	NoInterval                      = 0
+	done              time.Duration = -1
+	noMaximumAttempts               = 0
+
+	// DefaultBackoffCoefficient is default backOffCoefficient for retryPolicy
+	DefaultBackoffCoefficient = 2.0
+	defaultMaximumInterval    = 10 * time.Second
+	defaultExpirationInterval = time.Minute
+	defaultMaximumAttempts    = noMaximumAttempts
 )
 
 type (
 	// RetryPolicy is the API which needs to be implemented by various retry policy implementations
 	RetryPolicy interface {
-		ComputeNextDelay(elapsedTime time.Duration, attempt int) time.Duration
-		GrpcRetryConfig() *retry.GrpcRetryConfig
+		ComputeNextDelay(elapsedTime time.Duration, numAttempts int) time.Duration
 	}
 
 	// Retrier manages the state of retry operation
 	Retrier interface {
-		GetElapsedTime() time.Duration
 		NextBackOff() time.Duration
 		Reset()
 	}
@@ -82,10 +87,10 @@ var SystemClock = systemClock{}
 func NewExponentialRetryPolicy(initialInterval time.Duration) *ExponentialRetryPolicy {
 	p := &ExponentialRetryPolicy{
 		initialInterval:    initialInterval,
-		backoffCoefficient: retry.DefaultBackoffCoefficient,
-		maximumInterval:    retry.DefaultMaximumInterval,
-		expirationInterval: retry.DefaultExpirationInterval,
-		maximumAttempts:    retry.DefaultMaximumAttempts,
+		backoffCoefficient: DefaultBackoffCoefficient,
+		maximumInterval:    defaultMaximumInterval,
+		expirationInterval: defaultExpirationInterval,
+		maximumAttempts:    defaultMaximumAttempts,
 	}
 
 	return p
@@ -131,27 +136,27 @@ func (p *ExponentialRetryPolicy) SetMaximumAttempts(maximumAttempts int) {
 }
 
 // ComputeNextDelay returns the next delay interval.  This is used by Retrier to delay calling the operation again
-func (p *ExponentialRetryPolicy) ComputeNextDelay(elapsedTime time.Duration, attempt int) time.Duration {
+func (p *ExponentialRetryPolicy) ComputeNextDelay(elapsedTime time.Duration, numAttempts int) time.Duration {
 	// Check to see if we ran out of maximum number of attempts
-	if p.maximumAttempts != retry.UnlimitedMaximumAttempts && attempt >= p.maximumAttempts {
+	if p.maximumAttempts != noMaximumAttempts && numAttempts > p.maximumAttempts {
 		return done
 	}
 
 	// Stop retrying after expiration interval is elapsed
-	if p.expirationInterval != retry.UnlimitedInterval && elapsedTime > p.expirationInterval {
+	if p.expirationInterval != NoInterval && elapsedTime > p.expirationInterval {
 		return done
 	}
 
-	nextInterval := float64(p.initialInterval) * math.Pow(p.backoffCoefficient, float64(attempt-1))
+	nextInterval := float64(p.initialInterval) * math.Pow(p.backoffCoefficient, float64(numAttempts-1))
 	// Disallow retries if initialInterval is negative or nextInterval overflows
 	if nextInterval <= 0 {
 		return done
 	}
-	if p.maximumInterval != retry.UnlimitedInterval {
+	if p.maximumInterval != NoInterval {
 		nextInterval = math.Min(nextInterval, float64(p.maximumInterval))
 	}
 
-	if p.expirationInterval != retry.UnlimitedInterval {
+	if p.expirationInterval != NoInterval {
 		remainingTime := math.Max(0, float64(p.expirationInterval-elapsedTime))
 		nextInterval = math.Min(remainingTime, nextInterval)
 	}
@@ -163,24 +168,14 @@ func (p *ExponentialRetryPolicy) ComputeNextDelay(elapsedTime time.Duration, att
 	}
 
 	// add jitter to avoid global synchronization
-	jitterPortion := int(retry.DefaultJitter * nextInterval)
+	jitterPortion := int(0.2 * nextInterval)
 	// Prevent overflow
 	if jitterPortion < 1 {
 		jitterPortion = 1
 	}
-	nextInterval = nextInterval*(1-retry.DefaultJitter) + float64(rand.Intn(jitterPortion))
+	nextInterval = nextInterval*0.8 + float64(rand.Intn(jitterPortion))
 
 	return time.Duration(nextInterval)
-}
-
-// GrpcRetryConfig converts retry policy into retry config.
-func (p *ExponentialRetryPolicy) GrpcRetryConfig() *retry.GrpcRetryConfig {
-	retryConfig := retry.NewGrpcRetryConfig(p.initialInterval)
-	retryConfig.SetBackoffCoefficient(p.backoffCoefficient)
-	retryConfig.SetExpirationInterval(p.expirationInterval)
-	retryConfig.SetMaximumAttempts(p.maximumAttempts)
-	retryConfig.SetMaximumInterval(p.maximumInterval)
-	return retryConfig
 }
 
 // Now returns the current time using the system clock
@@ -196,15 +191,13 @@ func (r *retrierImpl) Reset() {
 
 // NextBackOff returns the next delay interval.  This is used by Retry to delay calling the operation again
 func (r *retrierImpl) NextBackOff() time.Duration {
-	nextInterval := r.policy.ComputeNextDelay(r.GetElapsedTime(), r.currentAttempt)
+	nextInterval := r.policy.ComputeNextDelay(r.getElapsedTime(), r.currentAttempt)
 
 	// Now increment the current attempt
 	r.currentAttempt++
 	return nextInterval
 }
 
-// GetElapsedTime returns the amount of time since the retrier was created or the last reset,
-// whatever was sooner.
-func (r *retrierImpl) GetElapsedTime() time.Duration {
+func (r *retrierImpl) getElapsedTime() time.Duration {
 	return r.clock.Now().Sub(r.startTime)
 }

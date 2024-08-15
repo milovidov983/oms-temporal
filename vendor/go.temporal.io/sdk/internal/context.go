@@ -26,11 +26,13 @@ package internal
 
 import (
 	"fmt"
-	"sync"
 	"time"
 
+	"github.com/opentracing/opentracing-go"
 	enumspb "go.temporal.io/api/enums/v1"
 )
+
+const activeSpanContextKey contextKey = "activeSpanContextKey"
 
 // Context is a clone of context.Context with Done() returning Channel instead
 // of native channel.
@@ -198,14 +200,13 @@ func WithCancel(parent Context) (ctx Context, cancel CancelFunc) {
 
 // NewDisconnectedContext returns a new context that won't propagate parent's cancellation to the new child context.
 // One common use case is to do cleanup work after workflow is canceled.
-//
-//	err := workflow.ExecuteActivity(ctx, ActivityFoo).Get(ctx, &activityFooResult)
-//	if err != nil && temporal.IsCanceledError(ctx.Err()) {
-//	  // activity failed, and workflow context is canceled
-//	  disconnectedCtx, _ := workflow.NewDisconnectedContext(ctx);
-//	  workflow.ExecuteActivity(disconnectedCtx, handleCancellationActivity).Get(disconnectedCtx, nil)
-//	  return err // workflow return CanceledError
-//	}
+//  err := workflow.ExecuteActivity(ctx, ActivityFoo).Get(ctx, &activityFooResult)
+//  if err != nil && temporal.IsCanceledError(ctx.Err()) {
+//    // activity failed, and workflow context is canceled
+//    disconnectedCtx, _ := workflow.newDisconnectedContext(ctx);
+//    workflow.ExecuteActivity(disconnectedCtx, handleCancellationActivity).Get(disconnectedCtx, nil)
+//    return err // workflow return CanceledError
+//  }
 func NewDisconnectedContext(parent Context) (ctx Context, cancel CancelFunc) {
 	c := newCancelCtx(parent)
 	return c, func() { c.cancel(true, ErrCanceled) }
@@ -225,19 +226,24 @@ func propagateCancel(parent Context, child canceler) {
 		return // parent is never canceled
 	}
 	if p, ok := parentCancelCtx(parent); ok {
-		if parentErr := p.Err(); parentErr != nil {
+		if p.err != nil {
 			// parent has already been canceled
-			child.cancel(false, parentErr)
+			child.cancel(false, p.err)
 		} else {
-			p.childrenLock.Lock()
 			if p.children == nil {
 				p.children = make(map[canceler]bool)
 			}
 			p.children[child] = true
-			p.childrenLock.Unlock()
 		}
 	} else {
-		panic("cancelCtx not found")
+		go func() {
+			s := NewSelector(parent)
+			s.AddReceive(parent.Done(), func(c ReceiveChannel, more bool) {
+				child.cancel(false, parent.Err())
+			})
+			s.AddReceive(child.Done(), func(c ReceiveChannel, more bool) {})
+			s.Select(parent)
+		}()
 	}
 }
 
@@ -249,6 +255,9 @@ func parentCancelCtx(parent Context) (*cancelCtx, bool) {
 		switch c := parent.(type) {
 		case *cancelCtx:
 			return c, true
+		// TODO: Uncomment once timer story is implemented
+		//case *timerCtx:
+		//	return c.cancelCtx, true
 		case *valueCtx:
 			parent = c.Context
 		default:
@@ -263,11 +272,9 @@ func removeChild(parent Context, child canceler) {
 	if !ok {
 		return
 	}
-	p.childrenLock.Lock()
 	if p.children != nil {
 		delete(p.children, child)
 	}
-	p.childrenLock.Unlock()
 }
 
 // A canceler is a context type that can be canceled directly.  The
@@ -284,10 +291,8 @@ type cancelCtx struct {
 
 	done Channel // closed by the first cancel call.
 
-	children     map[canceler]bool // set to nil by the first cancel call
-	childrenLock sync.Mutex
-	err          error // set to non-nil by the first cancel call
-	errLock      sync.RWMutex
+	children map[canceler]bool // set to nil by the first cancel call
+	err      error             // set to non-nil by the first cancel call
 }
 
 func (c *cancelCtx) Done() Channel {
@@ -295,8 +300,6 @@ func (c *cancelCtx) Done() Channel {
 }
 
 func (c *cancelCtx) Err() error {
-	c.errLock.RLock()
-	defer c.errLock.RUnlock()
 	return c.err
 }
 
@@ -310,31 +313,98 @@ func (c *cancelCtx) cancel(removeFromParent bool, err error) {
 	if err == nil {
 		panic("context: internal error: missing cancel error")
 	}
-	// This can be called from separate goroutines concurrently, so we use the
-	// presence of the error under lock to prevent duplicate calls
-	c.errLock.Lock()
-	alreadyCancelled := c.err != nil
-	if !alreadyCancelled {
-		c.err = err
+	if c.err != nil {
+		return // already canceled
 	}
-	c.errLock.Unlock()
-	if alreadyCancelled {
-		return
-	}
+	c.err = err
 	c.done.Close()
-	c.childrenLock.Lock()
-	children := c.children
-	c.children = nil
-	c.childrenLock.Unlock()
-	for child := range children {
+	for child := range c.children {
 		// NOTE: acquiring the child's lock while holding parent's lock.
 		child.cancel(false, err)
 	}
+	c.children = nil
 
 	if removeFromParent {
 		removeChild(c.Context, c)
 	}
 }
+
+// Commented out until workflow time API is exposed.
+// WithDeadline returns a copy of the parent context with the deadline adjusted
+// to be no later than d.  If the parent's deadline is already earlier than d,
+// WithDeadline(parent, d) is semantically equivalent to parent.  The returned
+// context's Done channel is closed when the deadline expires, when the returned
+// cancel function is called, or when the parent context's Done channel is
+// closed, whichever happens first.
+//
+// Canceling this context releases resources associated with it, so code should
+// call cancel as soon as the operations running in this Context complete.
+//func WithDeadline(parent Context, deadline time.Time) (Context, CancelFunc) {
+//	if cur, ok := parent.Deadline(); ok && cur.Before(deadline) {
+//		// The current deadline is already sooner than the new one.
+//		return WithCancel(parent)
+//	}
+//	c := &timerCtx{
+//		cancelCtx: newCancelCtx(parent),
+//		deadline:  deadline,
+//	}
+//	propagateCancel(parent, c)
+//	d := deadline.Sub(time.Now())
+//	if d <= 0 {
+//		c.cancel(true, DeadlineExceeded) // deadline has already passed
+//		return c, func() { c.cancel(true, Canceled) }
+//	}
+//	if c.err == nil {
+//		c.timer = time.AfterFunc(d, func() {
+//			c.cancel(true, DeadlineExceeded)
+//		})
+//	}
+//	return c, func() { c.cancel(true, Canceled) }
+//}
+//
+//// A timerCtx carries a timer and a deadline.  It embeds a cancelCtx to
+//// implement Done and Err.  It implements cancel by stopping its timer then
+//// delegating to cancelCtx.cancel.
+//type timerCtx struct {
+//	*cancelCtx
+//	timer *time.Timer // Under cancelCtx.mu.
+//
+//	deadline time.Time
+//}
+//
+//func (c *timerCtx) Deadline() (deadline time.Time, ok bool) {
+//	return c.deadline, true
+//}
+//
+//func (c *timerCtx) String() string {
+//	return fmt.Sprintf("%v.WithDeadline(%s [%s])", c.cancelCtx.Context, c.deadline, c.deadline.Sub(time.Now()))
+//}
+//
+//func (c *timerCtx) cancel(removeFromParent bool, err error) {
+//	c.cancelCtx.cancel(false, err)
+//	if removeFromParent {
+//		// Remove this timerCtx from its parent cancelCtx's children.
+//		removeChild(c.cancelCtx.Context, c)
+//	}
+//	if c.timer != nil {
+//		c.timer.Stop()
+//		c.timer = nil
+//	}
+//}
+//
+// WithTimeout returns WithDeadline(parent, time.Now().Add(timeout)).
+//
+// Canceling this context releases resources associated with it, so code should
+// call cancel as soon as the operations running in this Context complete:
+//
+// 	func slowOperationWithTimeout(ctx context.Context) (Result, error) {
+// 		ctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+// 		defer cancel()  // releases resources if slowOperation completes before timeout elapses
+// 		return slowOperation(ctx)
+// 	}
+//func WithTimeout(parent Context, timeout time.Duration) (Context, CancelFunc) {
+//	return WithDeadline(parent, time.Now().Add(timeout))
+//}
 
 // WithValue returns a copy of parent in which the value associated with key is
 // val.
@@ -361,4 +431,16 @@ func (c *valueCtx) Value(key interface{}) interface{} {
 		return c.val
 	}
 	return c.Context.Value(key)
+}
+
+func spanFromContext(ctx Context) opentracing.SpanContext {
+	val := ctx.Value(activeSpanContextKey)
+	if sp, ok := val.(opentracing.SpanContext); ok {
+		return sp
+	}
+	return nil
+}
+
+func contextWithSpan(ctx Context, spanContext opentracing.SpanContext) Context {
+	return WithValue(ctx, activeSpanContextKey, spanContext)
 }

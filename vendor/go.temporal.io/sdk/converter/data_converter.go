@@ -35,27 +35,16 @@ type (
 	// To override DataConverter for specific activity or child workflow use workflow.WithDataConverter to create new Context,
 	// and pass that context to ExecuteActivity/ExecuteChildWorkflow calls.
 	// Temporal support using different DataConverters for different activity/childWorkflow in same workflow.
-	// For advanced data converters that may exceed the deadlock detection timeout
-	// for a workflow, such as ones making remote calls, use
-	// workflow.DataConverterWithoutDeadlockDetection.
 	DataConverter interface {
 		// ToPayload converts single value to payload.
 		ToPayload(value interface{}) (*commonpb.Payload, error)
 		// FromPayload converts single value from payload.
-		//
-		// Note, values should not be reused for extraction here because merging on
-		// top of existing values may result in unexpected behavior similar to
-		// json.Unmarshal.
 		FromPayload(payload *commonpb.Payload, valuePtr interface{}) error
 
 		// ToPayloads converts a list of values.
 		ToPayloads(value ...interface{}) (*commonpb.Payloads, error)
 		// FromPayloads converts to a list of values of different types.
 		// Useful for deserializing arguments of function invocations.
-		//
-		// Note, values should not be reused for extraction here because merging on
-		// top of existing values may result in unexpected behavior similar to
-		// json.Unmarshal.
 		FromPayloads(payloads *commonpb.Payloads, valuePtrs ...interface{}) error
 
 		// ToString converts payload object into human readable string.

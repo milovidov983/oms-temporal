@@ -22,8 +22,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-// Package testsuite contains unit testing framework for Temporal workflows and activities and a helper to download and
-// start a dev server.
+// Package testsuite contains unit testing framework for Temporal workflows and activities.
 package testsuite
 
 import (
