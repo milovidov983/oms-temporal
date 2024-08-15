@@ -17,8 +17,8 @@ func CartOrderWorkflow(ctx workflow.Context, state models.OrderState) error {
 		InitialInterval:        time.Second,
 		BackoffCoefficient:     2.0,
 		MaximumInterval:        100 * time.Second,
-		MaximumAttempts:        500, // 0 is unlimited retries
-		NonRetryableErrorTypes: []string{"InvalidAccountError", "InsufficientFundsError"},
+		MaximumAttempts:        500,                                                       // 0 is unlimited retries
+		NonRetryableErrorTypes: []string{"InvalidAccountError", "InsufficientFundsError"}, // todo переделать
 	}
 	// настраиваем опции запуска всех активити
 	options := workflow.ActivityOptions{
