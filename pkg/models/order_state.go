@@ -9,6 +9,7 @@ type (
 		Ordered         []OrderLines
 		Collected       []OrderLines
 		Delivered       []OrderLines
+		CancelReason    string
 	}
 	OrderLines struct {
 		ProductID int
@@ -21,18 +22,20 @@ type OrderStatus int
 
 const (
 	OrderStatusCreated = iota
-	OrderStatusAssembling
+	OrderStatusPassedToAssembly
 	OrderStatusAssembled
 	OrderStatusDelivering
 	OrderStatusDelivered
+	OrderStatusCanceled
 )
 
 var statusName = map[OrderStatus]string{
-	OrderStatusCreated:    "created",
-	OrderStatusAssembling: "assembling",
-	OrderStatusAssembled:  "assembled",
-	OrderStatusDelivering: "delivering",
-	OrderStatusDelivered:  "delivered",
+	OrderStatusCreated:          "created",
+	OrderStatusPassedToAssembly: "passed_to_assembly",
+	OrderStatusAssembled:        "assembled",
+	OrderStatusDelivering:       "delivering",
+	OrderStatusDelivered:        "delivered",
+	OrderStatusCanceled:         "canceled",
 }
 
 func (os OrderStatus) String() string {

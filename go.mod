@@ -6,6 +6,7 @@ require (
 	github.com/bojanz/httpx v0.0.0-20201111190843-d1cf01c49b2e
 	github.com/gorilla/handlers v1.5.2
 	github.com/gorilla/mux v1.8.1
+	github.com/mitchellh/mapstructure v1.5.0
 	github.com/stretchr/testify v1.9.0
 	go.temporal.io/api v1.36.0
 	go.temporal.io/sdk v1.28.1

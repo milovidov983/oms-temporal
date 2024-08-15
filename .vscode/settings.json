@@ -4,6 +4,7 @@
         "giftcardorder",
         "httpx",
         "Idempotency",
+        "mapstructure",
         "Retryable",
         "retrypolicy",
         "testsuite",

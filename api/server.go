@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -12,7 +11,6 @@ import (
 	"github.com/bojanz/httpx"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
-	"github.com/milovidov983/oms-temporal/internal"
 	"github.com/milovidov983/oms-temporal/internal/cartorder"
 	"github.com/milovidov983/oms-temporal/internal/signals"
 	"github.com/milovidov983/oms-temporal/internal/signals/channels"
@@ -116,6 +114,14 @@ func CompleteAssemblyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// TODO:
+	// При завершении этапа сборки необходимо сделать несколько синхронных
+	// вызовов, чтобы оповестить сборщика о том что все ок. А именно
+	// в собранных позициях все ок, оплата прошла корректно
+	// 1. Проверить позиции собранного
+	// 2. Произвести оплату
+
+	// 3. Отправка сигнала в workflow заказа для дальнейшей обработки
 	update := signals.SignalPayloadCompleteAssembly{
 		Route:     routes.RouteTypeCompleteAssembly,
 		Collected: collected,
@@ -125,10 +131,6 @@ func CompleteAssemblyHandler(w http.ResponseWriter, r *http.Request) {
 
 	err := temporal.SignalWorkflow(r.Context(), workflowID, "", signalName, update)
 
-	if errors.Is(err, internal.ErrWrongStatus) {
-		WriteBadRequest(w, err)
-		return
-	}
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -157,10 +159,6 @@ func ChangeAssemblyCommentHandler(w http.ResponseWriter, r *http.Request) {
 
 	err := temporal.SignalWorkflow(r.Context(), workflowID, "", signalName, update)
 
-	if errors.Is(err, internal.ErrWrongStatus) {
-		WriteBadRequest(w, err)
-		return
-	}
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -189,10 +187,6 @@ func CompleteDeliveryHandler(w http.ResponseWriter, r *http.Request) {
 
 	err := temporal.SignalWorkflow(r.Context(), workflowID, "", signalName, update)
 
-	if errors.Is(err, internal.ErrWrongStatus) {
-		WriteBadRequest(w, err)
-		return
-	}
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -221,10 +215,6 @@ func ChangeDeliveryCommentHandler(w http.ResponseWriter, r *http.Request) {
 
 	err := temporal.SignalWorkflow(r.Context(), workflowID, "", signalName, update)
 
-	if errors.Is(err, internal.ErrWrongStatus) {
-		WriteBadRequest(w, err)
-		return
-	}
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -253,10 +243,6 @@ func CancelOrderHandler(w http.ResponseWriter, r *http.Request) {
 
 	err := temporal.SignalWorkflow(r.Context(), workflowID, "", signalName, update)
 
-	if errors.Is(err, internal.ErrWrongStatus) {
-		WriteBadRequest(w, err)
-		return
-	}
 	if err != nil {
 		WriteError(w, err)
 		return
