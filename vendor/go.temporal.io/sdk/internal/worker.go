@@ -70,6 +70,8 @@ type (
 		// once for every 10 seconds. This can be used to protect down stream services from flooding.
 		// The zero value of this uses the default value.
 		// default: 100k
+		//
+		// Note: Setting this to a non zero value will also disable eager activities.
 		TaskQueueActivitiesPerSecond float64
 
 		// Optional: Sets the maximum number of goroutines that will concurrently poll the
@@ -79,15 +81,30 @@ type (
 		MaxConcurrentActivityTaskPollers int
 
 		// Optional: To set the maximum concurrent workflow task executions this worker can have.
-		// The zero value of this uses the default value.
+		// The zero value of this uses the default value. Due to internal logic where pollers
+		// alternate between stick and non-sticky queues, this
+		// value cannot be 1 and will panic if set to that value.
 		// default: defaultMaxConcurrentTaskExecutionSize(1k)
 		MaxConcurrentWorkflowTaskExecutionSize int
 
 		// Optional: Sets the maximum number of goroutines that will concurrently poll the
 		// temporal-server to retrieve workflow tasks. Changing this value will affect the
-		// rate at which the worker is able to consume tasks from a task queue.
+		// rate at which the worker is able to consume tasks from a task queue. Due to
+		// internal logic where pollers alternate between stick and non-sticky queues, this
+		// value cannot be 1 and will panic if set to that value.
 		// default: 2
 		MaxConcurrentWorkflowTaskPollers int
+
+		// Optional: Sets the maximum concurrent nexus task executions this worker can have.
+		// The zero value of this uses the default value.
+		// default: defaultMaxConcurrentTaskExecutionSize(1k)
+		MaxConcurrentNexusTaskExecutionSize int
+
+		// Optional: Sets the maximum number of goroutines that will concurrently poll the
+		// temporal-server to retrieve nexus tasks. Changing this value will affect the
+		// rate at which the worker is able to consume tasks from a task queue.
+		// default: 2
+		MaxConcurrentNexusTaskPollers int
 
 		// Optional: Enable logging in replay.
 		// In the workflow code you can use workflow.GetLogger(ctx) to write logs. By default, the logger will skip log
@@ -96,26 +113,24 @@ type (
 		// default: false
 		EnableLoggingInReplay bool
 
-		// Optional: Disable sticky execution.
+		// Optional: Sticky schedule to start timeout.
+		// The resolution is seconds.
+		//
 		// Sticky Execution is to run the workflow tasks for one workflow execution on same worker host. This is an
 		// optimization for workflow execution. When sticky execution is enabled, worker keeps the workflow state in
 		// memory. New workflow task contains the new history events will be dispatched to the same worker. If this
 		// worker crashes, the sticky workflow task will timeout after StickyScheduleToStartTimeout, and temporal server
 		// will clear the stickiness for that workflow execution and automatically reschedule a new workflow task that
 		// is available for any worker to pick up and resume the progress.
-		// default: false
 		//
-		// Deprecated: DisableStickyExecution harms performance. It will be removed soon. See SetStickyWorkflowCacheSize
-		// instead.
-		DisableStickyExecution bool
-
-		// Optional: Sticky schedule to start timeout.
-		// The resolution is seconds. See details about StickyExecution on the comments for DisableStickyExecution.
 		// default: 5s
 		StickyScheduleToStartTimeout time.Duration
 
-		// Optional: sets context for activity. The context can be used to pass any configuration to activity
-		// like common logger for all activities.
+		// Optional: sets root context for all activities. The context can be used to pass external dependencies
+		// like DB connections to activity functions.
+		// Note that this method of passing dependencies is not recommended anymore.
+		// Instead, use a structure with fields that contain dependencies and activities
+		// as the structure member functions. Then pass all the dependencies on the structure initialization.
 		BackgroundActivityContext context.Context
 
 		// Optional: Sets how workflow worker deals with non-deterministic history events
@@ -144,9 +159,11 @@ type (
 		// default: 1000
 		MaxConcurrentSessionExecutionSize int
 
-		// Optional: Specifies factories used to instantiate workflow interceptor chain
-		// The chain is instantiated per each replay of a workflow execution
-		WorkflowInterceptorChainFactories []WorkflowInterceptor
+		// Optional: If set to true, a workflow worker is not started for this
+		// worker and workflows cannot be registered with this worker. Use this if
+		// you only want your worker to execute activities.
+		// default: false
+		DisableWorkflowWorker bool
 
 		// Optional: If set to true worker would only handle workflow tasks and local activities.
 		// Non-local activities will not be executed by this worker.
@@ -156,6 +173,83 @@ type (
 		// Optional: If set overwrites the client level Identify value.
 		// default: client identity
 		Identity string
+
+		// Optional: If set defines maximum amount of time that workflow task will be allowed to run. Defaults to 1 sec.
+		DeadlockDetectionTimeout time.Duration
+
+		// Optional: The maximum amount of time between sending each pending heartbeat to the server. Regardless of
+		// heartbeat timeout, no pending heartbeat will wait longer than this amount of time to send. To effectively disable
+		// heartbeat throttling, this can be set to something like 1 nanosecond, but it is not recommended.
+		// default: 60 seconds
+		MaxHeartbeatThrottleInterval time.Duration
+
+		// Optional: The default amount of time between sending each pending heartbeat to the server. This is used if the
+		// ActivityOptions do not provide a HeartbeatTimeout. Otherwise, the interval becomes a value a bit smaller than the
+		// given HeartbeatTimeout.
+		// default: 30 seconds
+		DefaultHeartbeatThrottleInterval time.Duration
+
+		// Interceptors to apply to the worker. Earlier interceptors wrap later
+		// interceptors.
+		//
+		// When worker interceptors are here and in client options, the ones in
+		// client options wrap the ones here. The same interceptor should not be set
+		// here and in client options.
+		Interceptors []WorkerInterceptor
+
+		// Optional: Callback invoked on fatal error. Immediately after this
+		// returns, Worker.Stop() will be called.
+		OnFatalError func(error)
+
+		// Optional: Disable eager activities. If set to true, activities will not
+		// be requested to execute eagerly from the same workflow regardless of
+		// MaxConcurrentEagerActivityExecutionSize.
+		//
+		// Eager activity execution means the server returns requested eager
+		// activities directly from the workflow task back to this worker which is
+		// faster than non-eager which may be dispatched to a separate worker.
+		//
+		// Note: Eager activities will automatically be disabled if TaskQueueActivitiesPerSecond is set.
+		DisableEagerActivities bool
+
+		// Optional: Maximum number of eager activities that can be running.
+		//
+		// When non-zero, eager activity execution will not be requested for
+		// activities schedule by the workflow if it would cause the total number of
+		// running eager activities to exceed this value. For example, if this is
+		// set to 1000 and there are already 998 eager activities executing and a
+		// workflow task schedules 3 more, only the first 2 will request eager
+		// execution.
+		//
+		// The default of 0 means unlimited and therefore only bound by
+		// MaxConcurrentActivityExecutionSize.
+		//
+		// See DisableEagerActivities for a description of eager activity execution.
+		MaxConcurrentEagerActivityExecutionSize int
+
+		// Optional: Disable allowing workflow and activity functions that are
+		// registered with custom names from being able to be called with their
+		// function references.
+		//
+		// Users are strongly recommended to set this as true if they register any
+		// workflow or activity functions with custom names. By leaving this as
+		// false, the historical default, ambiguity can occur between function names
+		// and aliased names when not using string names when executing child
+		// workflow or activities.
+		DisableRegistrationAliasing bool
+
+		// Assign a BuildID to this worker. This replaces the deprecated binary checksum concept,
+		// and is used to provide a unique identifier for a set of worker code, and is necessary
+		// to opt in to the Worker Versioning feature. See UseBuildIDForVersioning.
+		// NOTE: Experimental
+		BuildID string
+
+		// Optional: If set, opts this worker into the Worker Versioning feature. It will only
+		// operate on workflows it claims to be compatible with. You must set BuildID if this flag
+		// is true.
+		// NOTE: Experimental
+		// Note: Cannot be enabled at the same time as EnableSessionWorker
+		UseBuildIDForVersioning bool
 	}
 )
 
@@ -186,19 +280,20 @@ func IsReplayNamespace(dn string) bool {
 }
 
 // NewWorker creates an instance of worker for managing workflow and activity executions.
-// client   - client created with client.NewClient().
-// taskQueue - is the task queue name you use to identify your client worker, also
-//            identifies group of workflow and activity implementations that are hosted by a single worker process.
+// client   - client created with client.Dial() or client.NewLazyClient().
+// taskQueue - is the task queue name you use to identify your client worker,
+// also identifies group of workflow and activity implementations that are
+// hosted by a single worker process.
+//
 // options 	- configure any worker specific options.
 func NewWorker(
 	client Client,
 	taskQueue string,
 	options WorkerOptions,
 ) *AggregatedWorker {
-	// TODO: refactor and remove this downcast: https://github.com/temporalio/go-sdk/issues/70
 	workflowClient, ok := client.(*WorkflowClient)
 	if !ok {
-		panic("Client must be created with client.NewClient()")
+		panic("Client must be created with client.Dial() or client.NewLazyClient()")
 	}
 	return NewAggregatedWorker(workflowClient, taskQueue, options)
 }

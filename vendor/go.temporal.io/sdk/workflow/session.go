@@ -31,9 +31,17 @@ import (
 type (
 	// SessionInfo contains information of a created session. For now, exported
 	// fields are SessionID and HostName.
+	//
 	// SessionID is a uuid generated when CreateSession() or RecreateSession()
 	// is called and can be used to uniquely identify a session.
+	//
 	// HostName specifies which host is executing the session
+	//
+	// SessionState specifies the current know state of the session.
+	//
+	// Note: Sessions have an inherently stale view of the worker they are running on. Session
+	// state may be stale up the the SessionOptions.HeartbeatTimeout. SessionOptions.HeartbeatTimeout
+	// should be less than half the activity timeout for the state to be accurate when checking after activity failure.
 	SessionInfo = internal.SessionInfo
 
 	// SessionOptions specifies metadata for a session.
@@ -45,11 +53,25 @@ type (
 	//     Specifies the heartbeat timeout. If heartbeat is not received by server
 	//     within the timeout, the session will be declared as failed
 	SessionOptions = internal.SessionOptions
+
+	// SessionState specifies the state of the session.
+	SessionState = internal.SessionState
 )
 
-// ErrSessionFailed is the error returned when user tries to execute an activity but the
-// session it belongs to has already failed
-var ErrSessionFailed = internal.ErrSessionFailed
+var (
+	// ErrSessionFailed is the error returned when user tries to execute an activity but the
+	// session it belongs to has already failed
+	ErrSessionFailed = internal.ErrSessionFailed
+
+	// SessionStateOpen means the session worker is heartbeating and new activities will be schedule on the session host.
+	SessionStateOpen = internal.SessionStateOpen
+
+	// SessionStateClosed means the session was closed by the workflow and new activities will not be scheduled on the session host.
+	SessionStateClosed = internal.SessionStateClosed
+
+	// SessionStateFailed means the session worker was detected to be down and the session cannot be used to schedule new activities.
+	SessionStateFailed = internal.SessionStateFailed
+)
 
 // Note: Worker should be configured to process session. To do this, set the following
 // fields in WorkerOptions:
@@ -62,11 +84,11 @@ var ErrSessionFailed = internal.ErrSessionFailed
 // ActivityOptions. If none is specified, the default one will be used.
 //
 // CreationSession will fail in the following situations:
-//     1. The context passed in already contains a session which is still open
-//        (not closed and failed).
-//     2. All the workers are busy (number of sessions currently running on all the workers have reached
-//        MaxConcurrentSessionExecutionSize, which is specified when starting the workers) and session
-//        cannot be created within a specified timeout.
+//  1. The context passed in already contains a session which is still open
+//     (not closed and failed).
+//  2. All the workers are busy (number of sessions currently running on all the workers have reached
+//     MaxConcurrentSessionExecutionSize, which is specified when starting the workers) and session
+//     cannot be created within a specified timeout.
 //
 // If an activity is executed using the returned context, it's regarded as part of the
 // session. All activities within the same session will be executed by the same worker.
@@ -83,22 +105,26 @@ var ErrSessionFailed = internal.ErrSessionFailed
 // New session can be created if necessary to retry the whole session.
 //
 // Example:
-//    so := &SessionOptions{
-// 	      ExecutionTimeout: time.Minute,
-// 	      CreationTimeout:  time.Minute,
-//    }
-//    sessionCtx, err := CreateSession(ctx, so)
-//    if err != nil {
-//		    // Creation failed. Wrong ctx or too many outstanding sessions.
-//    }
-//    defer CompleteSession(sessionCtx)
-//    err = ExecuteActivity(sessionCtx, someActivityFunc, activityInput).Get(sessionCtx, nil)
-//    if err == ErrSessionFailed {
-//        // Session has failed
-//    } else {
-//        // Handle activity error
-//    }
-//    ... // execute more activities using sessionCtx
+//
+//	   so := &SessionOptions{
+//		      ExecutionTimeout: time.Minute,
+//		      CreationTimeout:  time.Minute,
+//	   }
+//	   sessionCtx, err := CreateSession(ctx, so)
+//	   if err != nil {
+//			    // Creation failed. Wrong ctx or too many outstanding sessions.
+//	   }
+//	   defer CompleteSession(sessionCtx)
+//	   err = ExecuteActivity(sessionCtx, someActivityFunc, activityInput).Get(sessionCtx, nil)
+//	   if err == ErrSessionFailed {
+//	       // Session has failed
+//	   } else {
+//	       // Handle activity error
+//	   }
+//	   ... // execute more activities using sessionCtx
+//
+// NOTE: Session recreation via RecreateSession may not work properly across worker fail/crash before Temporal server
+// version v1.15.1.
 func CreateSession(ctx Context, sessionOptions *SessionOptions) (Context, error) {
 	return internal.CreateSession(ctx, sessionOptions)
 }
@@ -111,6 +137,9 @@ func CreateSession(ctx Context, sessionOptions *SessionOptions) (Context, error)
 // The main usage of RecreateSession is for long sessions that are splited into multiple runs. At the end of
 // one run, complete the current session, get recreateToken from sessionInfo by calling SessionInfo.GetRecreateToken()
 // and pass the token to the next run. In the new run, session can be recreated using that token.
+//
+// NOTE: Session recreation via RecreateSession may not work properly across worker fail/crash before Temporal server
+// version v1.15.1.
 func RecreateSession(ctx Context, recreateToken []byte, sessionOptions *SessionOptions) (Context, error) {
 	return internal.RecreateSession(ctx, recreateToken, sessionOptions)
 }
@@ -122,6 +151,9 @@ func RecreateSession(ctx Context, recreateToken []byte, sessionOptions *SessionO
 // After a session has completed, user can continue to use the context, but the activities will be scheduled
 // on the normal taskQueue (as user specified in ActivityOptions) and may be picked up by another worker since
 // it's not in a session.
+//
+// Due to internal logic, this call must be made in the same coroutine CreateSession/RecreateSession were
+// called in.
 func CompleteSession(ctx Context) {
 	internal.CompleteSession(ctx)
 }

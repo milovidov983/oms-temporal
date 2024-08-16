@@ -28,6 +28,7 @@ package worker
 import (
 	"context"
 
+	"github.com/nexus-rpc/sdk-go/nexus"
 	historypb "go.temporal.io/api/history/v1"
 	"go.temporal.io/api/workflowservice/v1"
 
@@ -45,16 +46,27 @@ type (
 		Registry
 
 		// Start the worker in a non-blocking fashion.
+		//
+		// Note, this will only return errors on start. To catch errors during run,
+		// use Run() instead or set Options.OnFatalError.
 		Start() error
 
 		// Run the worker in a blocking fashion. Stop the worker when interruptCh receives signal.
 		// Pass worker.InterruptCh() to stop the worker with SIGINT or SIGTERM.
 		// Pass nil to stop the worker with external Stop() call.
 		// Pass any other `<-chan interface{}` and Run will wait for signal from that channel.
-		// Returns error only if worker fails to start.
+		// Returns error if the worker fails to start or there is a fatal error
+		// during execution.
+		//
+		// Users are encouraged to use Start() instead of this call if they plan to
+		// manually Stop(). Otherwise a race can occur if shutdown occurs before the
+		// worker is started. This Run() call is only best if shutdown is initiated
+		// via the interrupt channel.
 		Run(interruptCh <-chan interface{}) error
 
 		// Stop the worker.
+		//
+		// This may panic if called a second time.
 		Stop()
 	}
 
@@ -62,12 +74,13 @@ type (
 	Registry interface {
 		WorkflowRegistry
 		ActivityRegistry
+		NexusServiceRegistry
 	}
 
 	// WorkflowRegistry exposes workflow registration functions to consumers.
 	WorkflowRegistry interface {
 		// RegisterWorkflow - registers a workflow function with the worker.
-		// A workflow takes a workflow.Context and input and returns a (result, error) or just error.
+		// A workflow takes a [workflow.Context] and input and returns a (result, error) or just error.
 		// Examples:
 		//	func sampleWorkflow(ctx workflow.Context, input []byte) (result []byte, err error)
 		//	func sampleWorkflow(ctx workflow.Context, arg1 int, arg2 string) (result []byte, err error)
@@ -139,12 +152,20 @@ type (
 		RegisterActivityWithOptions(a interface{}, options activity.RegisterOptions)
 	}
 
+	// NexusServiceRegistry exposes Nexus Service registration functions.
+	NexusServiceRegistry interface {
+		// RegisterNexusService registers a service with a worker. Panics if a service with the same name has
+		// already been registered on this worker or if the worker has already been started. A worker will only
+		// poll for Nexus tasks if any services are registered on it.
+		RegisterNexusService(*nexus.Service)
+	}
+
 	// WorkflowReplayer supports replaying a workflow from its event history.
 	// Use for troubleshooting and backwards compatibility unit tests.
 	// For example if a workflow failed in production then its history can be downloaded through UI or CLI
 	// and replayed in a debugger as many times as necessary.
 	// Use this class to create unit tests that check if workflow changes are backwards compatible.
-	// It is important to maintain backwards compatibility through use of workflow.GetVersion
+	// It is important to maintain backwards compatibility through use of [workflow.GetVersion]
 	// to ensure that new deployments are not going to break open workflows.
 	WorkflowReplayer interface {
 		// RegisterWorkflow registers workflow that is going to be replayed
@@ -156,10 +177,20 @@ type (
 		// ReplayWorkflowHistory executes a single workflow task for the given json history file.
 		// Use for testing the backwards compatibility of code changes and troubleshooting workflows in a debugger.
 		// The logger is an optional parameter. Defaults to the noop logger.
+		//
+		// History can be loaded from a reader with client.HistoryFromJSON.
 		ReplayWorkflowHistory(logger log.Logger, history *historypb.History) error
 
+		// ReplayWorkflowHistoryWithOptions executes a single workflow task for the given json history file.
+		// Use for testing the backwards compatibility of code changes and troubleshooting workflows in a debugger.
+		// The logger is an optional parameter. Defaults to the noop logger. Options allow aditional customization when
+		// replaying this history.
+		//
+		// History can be loaded from a reader with client.HistoryFromJSON.
+		ReplayWorkflowHistoryWithOptions(logger log.Logger, history *historypb.History, options ReplayWorkflowHistoryOptions) error
+
 		// ReplayWorkflowHistoryFromJSONFile executes a single workflow task for the json history file downloaded from the cli.
-		// To download the history file: temporal workflow showid <workflow_id> -of <output_filename>
+		// To download the history file: temporal workflow show --workflow-id <workflow_id> --output json > <output_file>
 		// See https://github.com/temporalio/temporal/blob/master/tools/cli/README.md for full documentation
 		// Use for testing the backwards compatibility of code changes and troubleshooting workflows in a debugger.
 		// The logger is an optional parameter. Defaults to the noop logger.
@@ -167,7 +198,7 @@ type (
 
 		// ReplayPartialWorkflowHistoryFromJSONFile executes a single workflow task for the json history file upto provided
 		// lastEventID(inclusive), downloaded from the cli.
-		// To download the history file: temporal workflow showid <workflow_id> -of <output_filename>
+		// To download the history file: temporal workflow show --workflow-id <workflow_id> --output json > <output_file>
 		// See https://github.com/temporalio/temporal/blob/master/tools/cli/README.md for full documentation
 		// Use for testing the backwards compatibility of code changes and troubleshooting workflows in a debugger.
 		// The logger is an optional parameter. Defaults to the noop logger.
@@ -175,7 +206,8 @@ type (
 
 		// ReplayWorkflowExecution loads a workflow execution history from the Temporal service and executes a single workflow task for it.
 		// Use for testing the backwards compatibility of code changes and troubleshooting workflows in a debugger.
-		// The logger is the only optional parameter. Defaults to the noop logger.
+		// The logger is the only optional parameter. Defaults to the noop logger. The Run ID and Workflow ID used during replay are derived
+		// from execution.
 		ReplayWorkflowExecution(ctx context.Context, service workflowservice.WorkflowServiceClient, logger log.Logger, namespace string, execution workflow.Execution) error
 	}
 
@@ -184,9 +216,16 @@ type (
 
 	// WorkflowPanicPolicy is used for configuring how worker deals with workflow
 	// code panicking which includes non backwards compatible changes to the workflow code without appropriate
-	// versioning (see workflow.GetVersion).
+	// versioning (see [workflow.GetVersion]).
 	// The default behavior is to block workflow execution until the problem is fixed.
 	WorkflowPanicPolicy = internal.WorkflowPanicPolicy
+
+	// WorkflowReplayerOptions are options used for
+	// NewWorkflowReplayerWithOptions.
+	WorkflowReplayerOptions = internal.WorkflowReplayerOptions
+
+	// ReplayWorkflowHistoryOptions are options for replaying a workflow.
+	ReplayWorkflowHistoryOptions = internal.ReplayWorkflowHistoryOptions
 )
 
 const (
@@ -202,11 +241,12 @@ const (
 )
 
 // New creates an instance of worker for managing workflow and activity executions.
-//    namespace   - the name of the temporal namespace
-//    taskQueue - is the task queue name you use to identify your client worker, also
-//               identifies group of workflow and activity implementations that are
-//               hosted by a single worker process
-//    options  - configure any worker specific options like logger, metrics, identity
+//
+//	client    - the client for use by the worker
+//	taskQueue - is the task queue name you use to identify your client worker, also
+//	           identifies group of workflow and activity implementations that are
+//	           hosted by a single worker process
+//	options  - configure any worker specific options like logger, metrics, identity
 func New(
 	client client.Client,
 	taskQueue string,
@@ -217,7 +257,17 @@ func New(
 
 // NewWorkflowReplayer creates a WorkflowReplayer instance.
 func NewWorkflowReplayer() WorkflowReplayer {
-	return internal.NewWorkflowReplayer()
+	w, err := NewWorkflowReplayerWithOptions(WorkflowReplayerOptions{})
+	if err != nil {
+		panic(err)
+	}
+	return w
+}
+
+// NewWorkflowReplayerWithOptions creates a WorkflowReplayer instance with the
+// given options.
+func NewWorkflowReplayerWithOptions(options WorkflowReplayerOptions) (WorkflowReplayer, error) {
+	return internal.NewWorkflowReplayer(options)
 }
 
 // EnableVerboseLogging enable or disable verbose logging of internal Temporal library components.

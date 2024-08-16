@@ -27,9 +27,8 @@ package activity
 import (
 	"context"
 
-	"github.com/uber-go/tally"
-
 	"go.temporal.io/sdk/internal"
+	"go.temporal.io/sdk/internal/common/metrics"
 	"go.temporal.io/sdk/log"
 )
 
@@ -61,9 +60,9 @@ func GetLogger(ctx context.Context) log.Logger {
 	return internal.GetActivityLogger(ctx)
 }
 
-// GetMetricsScope returns a metrics scope that can be used in activity
-func GetMetricsScope(ctx context.Context) tally.Scope {
-	return internal.GetActivityMetricsScope(ctx)
+// GetMetricsHandler returns a metrics handler that can be used in activity
+func GetMetricsHandler(ctx context.Context) metrics.Handler {
+	return internal.GetActivityMetricsHandler(ctx)
 }
 
 // RecordHeartbeat sends heartbeat for the currently executing activity
@@ -72,6 +71,9 @@ func GetMetricsScope(ctx context.Context) tally.Scope {
 //
 // details - the details that you provided here can be seen in the workflow when it receives TimeoutError, you
 // can check error with TimeoutType()/Details().
+//
+// Note: If using asynchronous activity completion,
+// after returning [ErrResultPending] users should heartbeat with [client.Client.RecordActivityHeartbeat]
 func RecordHeartbeat(ctx context.Context, details ...interface{}) {
 	internal.RecordActivityHeartbeat(ctx, details...)
 }
@@ -87,6 +89,10 @@ func HasHeartbeatDetails(ctx context.Context) bool {
 // details reported by activity from the failed attempt, the details would be delivered along with the activity task for
 // retry attempt. Activity could extract the details by GetHeartbeatDetails() and resume from the progress.
 // See TestActivityEnvironment.SetHeartbeatDetails() for unit test support.
+//
+// Note, values should not be reused for extraction here because merging on top
+// of existing values may result in unexpected behavior similar to
+// json.Unmarshal.
 func GetHeartbeatDetails(ctx context.Context, d ...interface{}) error {
 	return internal.GetHeartbeatDetails(ctx, d...)
 }
@@ -97,4 +103,9 @@ func GetHeartbeatDetails(ctx context.Context, d ...interface{}) error {
 // Use this channel to handle activity graceful exit when the activity worker stops.
 func GetWorkerStopChannel(ctx context.Context) <-chan struct{} {
 	return internal.GetWorkerStopChannel(ctx)
+}
+
+// IsActivity check if the context is an activity context from a normal or local activity.
+func IsActivity(ctx context.Context) bool {
+	return internal.IsActivity(ctx)
 }

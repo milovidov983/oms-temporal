@@ -28,6 +28,10 @@ import (
 	"go.temporal.io/sdk/log"
 )
 
+var _ log.Logger = (*ReplayLogger)(nil)
+var _ log.WithLogger = (*ReplayLogger)(nil)
+var _ log.WithSkipCallers = (*ReplayLogger)(nil)
+
 // ReplayLogger is Logger implementation that is aware of replay.
 type ReplayLogger struct {
 	logger                log.Logger
@@ -76,7 +80,14 @@ func (l *ReplayLogger) Error(msg string, keyvals ...interface{}) {
 	}
 }
 
-// With returns new logger the prepend every log entry with keyvals.
+// With returns new logger that prepend every log entry with keyvals.
 func (l *ReplayLogger) With(keyvals ...interface{}) log.Logger {
 	return NewReplayLogger(log.With(l.logger, keyvals...), l.isReplay, l.enableLoggingInReplay)
+}
+
+func (l *ReplayLogger) WithCallerSkip(depth int) log.Logger {
+	if sl, ok := l.logger.(log.WithSkipCallers); ok {
+		return NewReplayLogger(sl.WithCallerSkip(depth), l.isReplay, l.enableLoggingInReplay)
+	}
+	return l
 }
