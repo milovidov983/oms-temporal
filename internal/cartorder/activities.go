@@ -29,11 +29,6 @@ func (a *Activities) SendOrderToDelivery(ctx context.Context, order models.Order
 	return nil
 }
 
-func (a *Activities) CheckCollectedLines(ctx context.Context, order models.OrderState) error {
-	log.Printf("[info] Collected lines checked for order %s", order.OrderID)
-	return nil
-}
-
 func (a *Activities) SendEventOrderStatusChanged(ctx context.Context, order models.OrderState) error {
 	log.Printf("[info] Event order status changed for order %s new status is %s", order.OrderID, order.Status.String())
 	return nil
@@ -45,7 +40,7 @@ func (a *Activities) SendEventAssemblyCommentChanged(ctx context.Context, order 
 }
 
 func (a *Activities) SendEventAssemblyCommentFailedToChange(ctx context.Context, order models.OrderState) error {
-	log.Printf("[info] Event assembly comment failed to change for order %s, current status is", order.OrderID, order.Status.String())
+	log.Printf("[info] Event assembly comment failed to change for order %s, current status is %s", order.OrderID, order.Status.String())
 	return nil
 }
 
@@ -55,6 +50,6 @@ func (a *Activities) SendEventDeliveryCommentChanged(ctx context.Context, order 
 }
 
 func (a *Activities) SendEventDeliveryCommentFailedToChange(ctx context.Context, order models.OrderState) error {
-	log.Printf("[info] Event delivery comment failed to change for order %s, current status is", order.OrderID, order.Status.String())
+	log.Printf("[info] Event delivery comment failed to change for order %s, current status is %s", order.OrderID, order.Status.String())
 	return nil
 }

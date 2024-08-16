@@ -22,12 +22,15 @@ func main() {
 
 	a := &cartorder.Activities{}
 
-	w.RegisterActivity(a.CheckCollectedLines)
-	w.RegisterActivity(a.SendEventOrderStatusChanged)
+	w.RegisterActivity(a.UpdateDeliveryComment)
+	w.RegisterActivity(a.UpdateAssemblyComment)
 	w.RegisterActivity(a.SendOrderToAssembly)
 	w.RegisterActivity(a.SendOrderToDelivery)
-	w.RegisterActivity(a.UpdateAssemblyComment)
-	w.RegisterActivity(a.UpdateDeliveryComment)
+	w.RegisterActivity(a.SendEventOrderStatusChanged)
+	w.RegisterActivity(a.SendEventAssemblyCommentChanged)
+	w.RegisterActivity(a.SendEventAssemblyCommentFailedToChange)
+	w.RegisterActivity(a.SendEventDeliveryCommentChanged)
+	w.RegisterActivity(a.SendEventDeliveryCommentFailedToChange)
 
 	w.RegisterWorkflow(cartorder.CartOrderWorkflow)
 

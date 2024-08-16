@@ -21,7 +21,8 @@ type (
 type OrderStatus int
 
 const (
-	OrderStatusCreated = iota
+	OrderStatusUndefined = iota
+	OrderStatusCreated
 	OrderStatusTransferredToAssembly
 	OrderStatusAssemblyInProgress
 	OrderStatusAssembled
@@ -32,6 +33,7 @@ const (
 )
 
 var statusName = map[OrderStatus]string{
+	OrderStatusUndefined:             "undefined",
 	OrderStatusCreated:               "created",
 	OrderStatusTransferredToAssembly: "transferred_to_assembly",
 	OrderStatusAssemblyInProgress:    "assembly_in_progress",

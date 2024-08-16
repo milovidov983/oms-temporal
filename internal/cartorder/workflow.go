@@ -42,22 +42,33 @@ func CartOrderWorkflow(ctx workflow.Context, state models.OrderState) error {
 
 	// Создание каналов
 	createOrderChannel := workflow.GetSignalChannel(ctx, channels.SignalNameCreateOrderChannel)
-	transferToAssemblyLocalChannel := workflow.NewChannel(ctx)
 	completeAssemblyChannel := workflow.GetSignalChannel(ctx, channels.SignalNameCompleteAssemblyChannel)
-	transferToDeliveryLocalChannel := workflow.NewChannel(ctx)
 	changeAssemblyCommentChannel := workflow.GetSignalChannel(ctx, channels.SignalNameChangeAssemblyCommentChannel)
 	completeDeliveryChannel := workflow.GetSignalChannel(ctx, channels.SignalNameCompleteDeliveryChannel)
 	changeDeliveryCommentChannel := workflow.GetSignalChannel(ctx, channels.SignalNameChangeDeliveryCommentChannel)
 	cancelOrderChannel := workflow.GetSignalChannel(ctx, channels.SignalNameCancelOrderChannel)
 
-	orderCompleted := false
-
 	a := &Activities{}
 
+	finalOrderStatuses := map[models.OrderStatus]bool{
+		models.OrderStatusCanceled:  true,
+		models.OrderStatusDelivered: true,
+	}
+
 	for {
+		logger.Info("\n\n Новая итерация цикла. Состояние заказа " + state.Status.String() + "\n\n")
 		selector := workflow.NewSelector(ctx)
 		// Заказ создан
 		selector.AddReceive(createOrderChannel, func(c workflow.ReceiveChannel, _ bool) {
+			var signal interface{}
+			c.Receive(ctx, &signal)
+
+			logger.Debug("\n\nReceived create order signal. Status is " + state.Status.String() + "\n\n")
+
+			if state.Status != models.OrderStatusUndefined {
+				logger.Error("Invalid status for creating order: %s", state.Status.String())
+				return
+			}
 
 			state.Status = models.OrderStatusCreated
 
@@ -66,26 +77,10 @@ func CartOrderWorkflow(ctx workflow.Context, state models.OrderState) error {
 				logger.Error("Failed to send order status changed event: %v", sendEventStatusErr)
 			}
 
-			transferToAssemblyLocalChannel.Send(ctx, struct{}{})
-		})
-		// Отправка в сборку
-		selector.AddReceive(transferToAssemblyLocalChannel, func(c workflow.ReceiveChannel, _ bool) {
-
-			sendAssemblyErr := workflow.ExecuteActivity(ctx, a.SendOrderToAssembly, state).Get(ctx, nil)
-			if sendAssemblyErr != nil {
-				logger.Error("Failed to send order to assembly: %v", sendAssemblyErr)
-				return
-			}
-
-			state.Status = models.OrderStatusTransferredToAssembly
-
-			sendEventStatusErr := workflow.ExecuteActivity(ctx, a.SendEventOrderStatusChanged, state).Get(ctx, nil)
-			if sendEventStatusErr != nil {
-				logger.Error("Failed to send order status changed event: %v", sendEventStatusErr)
-			}
 		})
 		// Завершение сборки
 		selector.AddReceive(completeAssemblyChannel, func(c workflow.ReceiveChannel, _ bool) {
+			logger.Info("\n\nSTART completeAssemblyChannel \n\n")
 			var signal interface{}
 			c.Receive(ctx, &signal)
 
@@ -96,27 +91,12 @@ func CartOrderWorkflow(ctx workflow.Context, state models.OrderState) error {
 				return
 			}
 
+			logger.Info("\n\nBefore set data. " + message.Route + "\n\n")
+
 			state.Collected = message.Collected
 			state.Status = models.OrderStatusAssembled
 
-			sendEventStatusErr := workflow.ExecuteActivity(ctx, a.SendEventOrderStatusChanged, state).Get(ctx, nil)
-			if sendEventStatusErr != nil {
-				logger.Error("Failed to send order status changed event: %v", sendEventStatusErr)
-			}
-
-			// Отправили заказ в доставку
-			transferToDeliveryLocalChannel.Send(ctx, struct{}{})
-		})
-		// Отправка в доставку
-		selector.AddReceive(transferToDeliveryLocalChannel, func(c workflow.ReceiveChannel, _ bool) {
-
-			sendToDeliveryErr := workflow.ExecuteActivity(ctx, a.SendOrderToDelivery, state).Get(ctx, nil)
-			if sendToDeliveryErr != nil {
-				logger.Error("Failed to send order to delivery: %v", sendToDeliveryErr)
-				return
-			}
-
-			state.Status = models.OrderStatusTransferredToDelivery
+			logger.Info("\n\nAfter set data current state is " + state.Status.String() + "\n\n")
 
 			sendEventStatusErr := workflow.ExecuteActivity(ctx, a.SendEventOrderStatusChanged, state).Get(ctx, nil)
 			if sendEventStatusErr != nil {
@@ -125,6 +105,9 @@ func CartOrderWorkflow(ctx workflow.Context, state models.OrderState) error {
 		})
 		// Изменение комментария для сборщика
 		selector.AddReceive(changeAssemblyCommentChannel, func(c workflow.ReceiveChannel, _ bool) {
+			var signal interface{}
+			c.Receive(ctx, &signal)
+
 			isValidStatus := state.Status.Any(models.OrderStatusCreated, models.OrderStatusTransferredToAssembly)
 			if !isValidStatus {
 				sendEventCommentErr := workflow.ExecuteActivity(ctx, a.SendEventAssemblyCommentFailedToChange, state)
@@ -134,9 +117,6 @@ func CartOrderWorkflow(ctx workflow.Context, state models.OrderState) error {
 				logger.Warn("Invalid status for changing assembly comment: %v", state.Status)
 				return
 			}
-
-			var signal interface{}
-			c.Receive(ctx, &signal)
 
 			var message signals.SignalPayloadChangeAssemblyComment
 			err := mapstructure.Decode(signal, &message)
@@ -154,6 +134,9 @@ func CartOrderWorkflow(ctx workflow.Context, state models.OrderState) error {
 		})
 		// Изменение комментария для доставщика
 		selector.AddReceive(changeDeliveryCommentChannel, func(c workflow.ReceiveChannel, _ bool) {
+			var signal interface{}
+			c.Receive(ctx, &signal)
+
 			validStatuses := map[models.OrderStatus]bool{
 				models.OrderStatusCreated:               true,
 				models.OrderStatusTransferredToAssembly: true,
@@ -170,9 +153,6 @@ func CartOrderWorkflow(ctx workflow.Context, state models.OrderState) error {
 				logger.Warn("Invalid status for changing delivery comment: %v", state.Status)
 				return
 			}
-
-			var signal interface{}
-			c.Receive(ctx, &signal)
 
 			var message signals.SignalPayloadChangeDeliveryComment
 			err := mapstructure.Decode(signal, &message)
@@ -206,10 +186,7 @@ func CartOrderWorkflow(ctx workflow.Context, state models.OrderState) error {
 			if sendEventStatusErr != nil {
 				logger.Error("Failed to send order status changed event: %v", sendEventStatusErr)
 			}
-
-			orderCompleted = true
 		})
-
 		// Отмена заказа
 		selector.AddReceive(cancelOrderChannel, func(c workflow.ReceiveChannel, _ bool) {
 			var signal interface{}
@@ -229,16 +206,71 @@ func CartOrderWorkflow(ctx workflow.Context, state models.OrderState) error {
 			if sendEventStatusErr != nil {
 				logger.Error("Failed to send order status changed event: %v", sendEventStatusErr)
 			}
-
-			orderCompleted = true
 		})
 
 		selector.Select(ctx)
 
+		_ = workflow.Sleep(ctx, 10*time.Millisecond)
+
+		switch state.Status {
+		case models.OrderStatusCreated:
+			err := handleOrderCreated(ctx, &state, a)
+			logger.Info("\n\nAfter call handleOrderCreated. Current state is " + state.Status.String() + "\n\n")
+			if err != nil {
+				logger.Error("Failed to handle order created: %v", err)
+				return err
+			}
+		case models.OrderStatusAssembled:
+			err := handleOrderAssembled(ctx, &state, a)
+			if err != nil {
+				logger.Error("Failed to handle order assembled: %v", err)
+				return err
+			}
+		}
+
+		orderCompleted := finalOrderStatuses[state.Status]
 		if orderCompleted {
 			break
 		}
 	}
 
+	return nil
+}
+
+func handleOrderAssembled(ctx workflow.Context, state *models.OrderState, a *Activities) error {
+	logger := workflow.GetLogger(ctx)
+
+	// Отправка в доставку
+	sendToDeliveryErr := workflow.ExecuteActivity(ctx, a.SendOrderToDelivery, state).Get(ctx, nil)
+	if sendToDeliveryErr != nil {
+		logger.Error("Failed to send order to delivery: %v", sendToDeliveryErr)
+		return sendToDeliveryErr
+	}
+
+	state.Status = models.OrderStatusTransferredToDelivery
+
+	sendEventStatusErr := workflow.ExecuteActivity(ctx, a.SendEventOrderStatusChanged, state).Get(ctx, nil)
+	if sendEventStatusErr != nil {
+		logger.Error("Failed to send order status changed event: %v", sendEventStatusErr)
+	}
+	return nil
+}
+
+func handleOrderCreated(ctx workflow.Context, state *models.OrderState, a *Activities) error {
+	logger := workflow.GetLogger(ctx)
+
+	// Отправка в сборку
+	sendAssemblyErr := workflow.ExecuteActivity(ctx, a.SendOrderToAssembly, state).Get(ctx, nil)
+	if sendAssemblyErr != nil {
+		logger.Error("Failed to send order to assembly: %v", sendAssemblyErr)
+		return sendAssemblyErr
+	}
+
+	state.Status = models.OrderStatusTransferredToAssembly
+
+	sendEventStatusErr := workflow.ExecuteActivity(ctx, a.SendEventOrderStatusChanged, state).Get(ctx, nil)
+	if sendEventStatusErr != nil {
+		logger.Error("Failed to send order status changed event: %v", sendEventStatusErr)
+	}
 	return nil
 }

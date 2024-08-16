@@ -1,4 +1,4 @@
-PUT http://localhost:8888/order/ORDER-1723715599/assembly
+PUT http://localhost:8888/order/ORDER-1723807840/assembly
 Content-Type: application/json
 [
     {
